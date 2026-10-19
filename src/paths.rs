@@ -91,7 +91,16 @@ pub fn socket() -> PathBuf {
 fn pipe_in(home: &Path) -> PathBuf {
     let stem = if stem(home) == LEGACY_NAME { LEGACY_NAME } else { "reason-network" };
     let dir = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    let dir = dir.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map_or(dir.clone(), PathBuf::from);
+    pipe_for_dir(stem, &dir)
+}
+
+#[cfg(windows)]
+fn pipe_for_dir(stem: &str, dir: &Path) -> PathBuf {
+    let dir = match dir.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        // Stripping only `\\?\` from a UNC path loses its leading backslashes.
+        Some(s) => PathBuf::from(s.strip_prefix(r"UNC\").map_or_else(|| s.to_owned(), |unc| format!(r"\\{unc}"))),
+        None => dir.to_path_buf(),
+    };
     PathBuf::from(format!(r"\\.\pipe\{stem}-{:016x}", hash(&dir)))
 }
 
@@ -258,6 +267,20 @@ mod tests {
         let shouting = format!("{}\\", spelled.to_uppercase());
         assert_eq!(super::pipe_in(&dir), super::pipe_in(std::path::Path::new(&slashes)));
         assert_eq!(super::pipe_in(&dir), super::pipe_in(std::path::Path::new(&shouting)));
+        let canonical = dir.canonicalize().unwrap();
+        let plain = canonical.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
+        let old_pipe = format!(r"\\.\pipe\reason-network-{:016x}", super::hash(std::path::Path::new(plain)));
+        assert_eq!(super::pipe_in(std::path::Path::new(plain)), std::path::PathBuf::from(old_pipe));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn canonical_unc_home_keeps_the_old_pipe_name() {
+        let plain = std::path::Path::new(r"\\server\share\reason-home");
+        let verbatim = std::path::Path::new(r"\\?\UNC\server\share\reason-home");
+        let old_pipe = format!(r"\\.\pipe\reason-network-{:016x}", super::hash(plain));
+        assert_eq!(super::pipe_for_dir("reason-network", verbatim), std::path::PathBuf::from(old_pipe));
+        assert_eq!(super::pipe_for_dir("reason-network", verbatim), super::pipe_for_dir("reason-network", plain));
     }
 }
