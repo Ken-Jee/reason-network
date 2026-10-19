@@ -162,9 +162,11 @@ impl TeamState {
         TeamState { link: None, invites: BTreeMap::new(), ..self.clone() }
     }
 
-    /// Whether `endpoint` may be an active machine of `person`, on `signer`'s word.
-    fn may_take(&self, person: &str, endpoint: &EndpointId, signer: &EndpointId) -> bool {
-        self.active().any(|m| m.endpoint == *signer && m.person == person)
+    /// Whether `endpoint` may be an active machine of `person`, on the word `signer` gave at `at`: the signer was one of
+    /// that person's machines then (it still is, or it left since), or no other active machine has the name.
+    fn may_take(&self, person: &str, endpoint: &EndpointId, signer: &EndpointId, at: i64) -> bool {
+        self.member(signer).is_some_and(|m| m.person == person && (m.active || m.ts >= at))
+            && self.admitted().contains(signer)
             || !self.active().any(|m| m.person == person && m.endpoint != *endpoint)
     }
 
@@ -339,7 +341,7 @@ impl TeamState {
             }
             // A person's name belongs to their machines: a machine can't take a name another active machine has,
             // unless a machine of that person vouches for it (adding another of their own machines).
-            if e.body.active && !self.may_take(&e.body.person, &e.body.endpoint, &e.by) {
+            if e.body.active && !self.may_take(&e.body.person, &e.body.endpoint, &e.by, e.body.ts) {
                 continue;
             }
             if admitted.contains(&e.by) && e.verify(&self.id, "member") {
@@ -599,6 +601,19 @@ mod tests {
         let mut wrong = signed.clone();
         wrong.by = key().public();
         assert!(!wrong.verify("acme", "approval"));
+    }
+
+    #[test]
+    fn a_persons_machines_stay_when_the_one_that_let_them_in_leaves() {
+        // f lets in alex's old laptop b, b lets in two more of alex's machines, then b leaves: a newcomer keeps both.
+        let (f, b, c, e) = (key(), key(), key(), key());
+        let mut s = TeamState::found("vibes", "sam", "mbp", &f);
+        s.put_member(&f, b.public(), "alex", "old", true);
+        s.put_member(&b, c.public(), "alex", "nuc", true);
+        s.put_member(&b, e.public(), "alex", "air", true);
+        s.put_member(&b, b.public(), "alex", "old", false);
+        let v = TeamState::verified(&s).unwrap();
+        assert!(v.is_active(&c.public()) && v.is_active(&e.public()) && !v.is_active(&b.public()));
     }
 
     fn random_secret() -> String {
