@@ -233,12 +233,18 @@ impl Store {
         let mut st = self.db.prepare_cached("SELECT name FROM sessions WHERE last_seen < ?1 AND agent != 'cli'")?;
         let gone: Vec<String> = st.query_map([before], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         for name in gone.iter().filter(|n| !live.contains(n.as_str())) {
-            self.db.execute(
-                "DELETE FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0",
-                [format!("{person}/{name}")],
-            )?;
-            self.db.execute("DELETE FROM sessions WHERE name = ?1", [name])?;
+            self.forget_session(name, person)?;
         }
+        Ok(())
+    }
+
+    /// Forgets one session now, with the mail it never read (see `forget_sessions`).
+    pub fn forget_session(&self, name: &str, person: &str) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0",
+            [format!("{person}/{name}")],
+        )?;
+        self.db.execute("DELETE FROM sessions WHERE name = ?1", [name])?;
         Ok(())
     }
 

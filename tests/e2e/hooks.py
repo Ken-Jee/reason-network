@@ -154,9 +154,15 @@ listing = {"items": [
     {"session_id": "r-4", "status": "running", "title": "From an older server", "finished_at": None, "is_archived": False},
 ]}
 fail_next = os.path.join(D, "reason-fail-next")
+listing_file, list_fails = os.path.join(D, "reason-listing.json"), os.path.join(D, "reason-list-fails")
+with open(listing_file, "w") as f:
+    json.dump(listing, f)
 with open(fake_reason, "w") as f:
     f.write(f"""#!/bin/sh
-if [ "$1 $2 $3" = "session list --network" ]; then echo '{json.dumps(listing)}'; exit 0; fi
+if [ "$1 $2 $3" = "session list --network" ]; then
+  if [ -f {list_fails} ]; then echo "not signed in" >&2; exit 1; fi
+  cat {listing_file}; exit 0
+fi
 if [ -f {fail_next} ]; then rm {fail_next}; echo "not signed in" >&2; exit 1; fi
 printf '%s\\n' "$*" >> {reason_log}
 """)
@@ -191,6 +197,39 @@ while time.time() < deadline and open(reason_log).read().count("second try neede
     time.sleep(1)
 check("a Reason push that fails is retried at a later sync", first == 0 and open(reason_log).read().count("second try needed") == 1,
       f"first={first} log={open(reason_log).read()[-300:]}")
+
+
+def reason_listed(present, wait=60):
+    deadline = time.time() + wait
+    while time.time() < deadline and ("fix-flaky-billing-reason" in run("who")) != present:
+        time.sleep(1)
+    return ("fix-flaky-billing-reason" in run("who")) == present
+
+
+# Its Reason taken off the network: the session leaves at the next listing, and its name isn't kept here, so mail sent
+# to it while it is off isn't held for it.
+with open(listing_file, "w") as f:
+    json.dump({"items": listing["items"][1:]}, f)
+gone = reason_listed(False, 30)
+out = run("who", "--all")
+sent = run("send", "fix-flaky-billing-reason", "reason: while it was off")
+check("a Reason session that leaves the list leaves the network and is forgotten here",
+      gone and "fix-flaky-billing-reason" not in out and "no session called" in sent, out + sent)
+with open(listing_file, "w") as f:
+    json.dump(listing, f)
+back = reason_listed(True, 30)
+time.sleep(1)
+check("…so it comes back with no mail held for it", back and "while it was off" not in open(reason_log).read(),
+      open(reason_log).read()[-300:])
+# Listing fails (signed out, the API refusing): one failure is a blip; at the second in a row it leaves.
+open(list_fails, "w").close()
+started = time.time()
+gone = reason_listed(False, 60)
+took = time.time() - started
+out = run("who", "--all")
+check("a Reason session leaves the network once listing fails twice in a row",
+      gone and took > 10 and "fix-flaky-billing-reason" not in out, f"took {took:.0f}s; {out}")
+os.remove(list_fails)
 
 # A Claude session that was open before Reason Network was set up: no restart needed. It's on the team at once, gets
 # messages through its own socket, and replies with the CLI.
