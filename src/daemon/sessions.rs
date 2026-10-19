@@ -320,5 +320,5 @@ fn pick_name(g: &Inner, reg: &SessionReg, git: &GitInfo, elsewhere: &HashSet<Str
     if !taken(&base) {
         return Ok(base);
     }
-    Ok((2..).map(|i| format!("{base}-{i}")).find(|n| !taken(n)).expect("some suffix is free"))
+    Ok((2..).map(|i| util::joined(&base, &i.to_string())).find(|n| !taken(n)).expect("some suffix is free"))
 }

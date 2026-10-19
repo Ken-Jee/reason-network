@@ -120,7 +120,22 @@ pub fn slug(s: &str) -> String {
             out.push('-');
         }
     }
-    out.trim_end_matches('-').chars().take(40).collect()
+    // `out` is ASCII, so this cuts between characters; a dash left at the cut goes too.
+    out.truncate(40);
+    out.trim_end_matches('-').to_string()
+}
+
+/// `<base>-<suffix>` as a slug of at most 40 characters: both are slugged and the base is cut to make room, so the name
+/// is whole as written and teammates, who slug every name they receive, see the same one.
+pub fn joined(base: &str, suffix: &str) -> String {
+    let (base, suffix) = (slug(base), slug(suffix));
+    // A slug is ASCII, so this cuts between characters.
+    let base = base[..base.len().min(39usize.saturating_sub(suffix.len()))].trim_end_matches('-');
+    match (base.is_empty(), suffix.is_empty()) {
+        (true, _) => suffix,
+        (_, true) => base.to_string(),
+        _ => format!("{base}-{suffix}"),
+    }
 }
 
 /// Compact age: `45s`, `12m`, `3h`, `2d`.
@@ -300,7 +315,26 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "slowed by input it never keeps");
         // The cut is the same as slugging everything first.
         let long = "api ".repeat(100);
-        assert_eq!(slug(&long), long.trim().replace(' ', "-").chars().take(40).collect::<String>());
+        assert_eq!(slug(&long), "api-api-api-api-api-api-api-api-api-api");
+        // A dash where the cut falls goes, so a slug is always its own slug.
+        assert_eq!(slug(&format!("{} b", "a".repeat(39))), "a".repeat(39));
+    }
+
+    #[test]
+    fn joined_names_fit_the_cut() {
+        let long = slug("Quarterly financial reporting dashboard v2");
+        for suffix in ["claude", "gemini", "2", "12"] {
+            let name = joined(&long, suffix);
+            assert!(name.len() <= 40 && name.ends_with(&format!("-{suffix}")), "{name}");
+            assert_eq!(slug(&name), name);
+        }
+        assert_eq!(joined("api", "claude"), "api-claude");
+        // A dash left where the base is cut goes too.
+        assert_eq!(joined(&format!("{}-b", "a".repeat(32)), "claude"), format!("{}-claude", "a".repeat(32)));
+        // Neither part needs to be a slug already: an agent name as typed, or a base that isn't ASCII.
+        assert_eq!(joined(&"Ü".repeat(45), "Üa"), format!("{}-ua", "u".repeat(37)));
+        assert_eq!(joined("api", "My Agent"), "api-my-agent");
+        assert_eq!(joined("", "claude"), "claude");
     }
 
     #[test]
