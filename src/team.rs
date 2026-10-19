@@ -46,7 +46,7 @@ impl<T: Serialize> Signed<T> {
 pub struct Meta {
     pub name: String,
     /// A self-hosted iroh relay for the team (`https://relay.example.com`), which is then all its machines use: they
-    /// never contact n0. n0's public relays otherwise.
+    /// never contact n0. The default relays otherwise (`net::DEFAULT_RELAYS`; an older Reason Network uses n0's).
     pub relay: Option<String>,
     pub ts: i64,
 }
@@ -943,6 +943,32 @@ mod tests {
         assert_eq!(Ticket::decode(&old).unwrap(), t);
         t.hint_relay = Some("https://relay.example.com/".into());
         assert_eq!(Ticket::decode(&t.encode()).unwrap(), t);
+    }
+
+    #[test]
+    fn a_link_from_a_machine_on_the_default_relay_names_it_as_a_hint() {
+        let (a, b, c) = (key(), key(), key());
+        let default = crate::net::default_relays()[0].to_string();
+        let t = Ticket {
+            team: "00112233445566778899aabbccddeeff".into(),
+            name: "vibes".into(),
+            secret: random_secret(),
+            // The team runs no relay of its own: nothing to name here, as before.
+            relay: None,
+            hint_relay: Some(default.clone()),
+            hint_ips: vec!["192.168.1.20:51234".parse().unwrap()],
+            peers: vec![a.public(), b.public(), c.public()],
+        };
+        let enc = t.encode();
+        assert!(enc.len() < 300, "short enough for a link: {}", enc.len());
+        // Spelled out, which every earlier build reads, unlike a marker of its own would be.
+        let raw = BASE64URL_NOPAD.decode(enc.strip_prefix(TICKET_PREFIX).unwrap().as_bytes()).unwrap();
+        assert!(raw.windows(default.len()).any(|w| w == default.as_bytes()));
+        assert_eq!(Ticket::decode(&enc).unwrap(), t);
+        // The machine that made it is dialed there; the others are looked up.
+        let addrs = t.addrs();
+        assert_eq!(addrs[0].relay_urls().map(|u| u.to_string()).collect::<Vec<_>>(), [default]);
+        assert!(addrs[1..].iter().all(|a| a.relay_urls().next().is_none()));
     }
 
     #[test]

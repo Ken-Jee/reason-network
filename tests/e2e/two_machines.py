@@ -5,7 +5,7 @@
 Needs internet (iroh relays/discovery). Run inside a Claude Code session, the simulated Claude session pushes its
 test messages into that real session (they say "ignore this").
 """
-import json, os, re, subprocess, sys, tempfile, time
+import base64, json, os, re, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from proofs import TRUST, proof
 
@@ -114,6 +114,18 @@ def shown(who):
     time.sleep(0.5)
     p = os.path.join(D, f"notify-{who}.log")
     return open(p).read() if os.path.exists(p) else ""
+
+
+def link_relays(link):
+    """A team link's relay fields: the team's own, and the inviting machine's (0xFF: one of n0's, by region)."""
+    t = re.split(r"#rn1-|#tincan1", link)[1]
+    raw, at, fields = base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)), 32, []
+    for _ in range(3):  # the team name first
+        short = raw[at] == 0xFF
+        at += short
+        fields.append(("n0 " if short else "") + raw[at + 1:at + 1 + raw[at]].decode())
+        at += 1 + raw[at]
+    return fields[1:]
 os.makedirs(os.path.join(D, "work"), exist_ok=True)
 
 # --- team formation, signed in with Reason ---
@@ -140,6 +152,8 @@ out = cli("alice", "team")
 check("joiner sees alex connected, verified", re.search(r"alex \(verified\)\s+laptop\s+(direct|relay)", out) is not None, out)
 out = cli("alex", "team")
 check("founder sees alice connected, verified", re.search(r"alice \(verified\)\s+desktop\s+(direct|relay)", out) is not None, out)
+check("a team without a relay of its own is on Reason's: the link names it as where alex is",
+      link_relays(link.group(1)) == ["", "https://relay-sfo1.compute.reasonmachines.com/"] and "(Reason's, the default)" in out, out)
 j = as_json(cli("alex", "team", "--json"))
 check("team --json marks people verified, and each machine's proof", [(m["verified"], m["has_proof"]) for m in j.get("members", [])] == [(True, True)] * 2
       and j.get("link", "").startswith("https://") and j.get("team_name") == "vibes" and len(j.get("team_id", "")) == 32, j)

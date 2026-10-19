@@ -227,7 +227,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Use your own iroh relay for the team, so its machines never contact n0 (or `default` for n0's public relays)
+    /// Use your own iroh relay for the team, so its machines never contact n0 (or `default` for Reason's relay)
     Relay { url: String },
     /// List messages waiting for your approval (when `inbound` is `hold`)
     Held,
