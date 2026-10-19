@@ -109,7 +109,7 @@ impl Daemon {
                     .is_none()
                     .then(|| title.as_deref().map(first_words))
                     .flatten()
-                    .map(|t| format!("{t}-reason"));
+                    .map(|t| util::joined(&t, "reason"));
                 let reg = SessionReg {
                     key: key.clone(),
                     agent: "reason".into(),

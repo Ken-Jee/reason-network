@@ -125,12 +125,17 @@ pub fn slug(s: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-/// `<base>-<suffix>` as a slug of at most 40 characters: the base is cut to make room, so the name is whole as written
-/// and teammates, who slug every name they receive, see the same one. `base` is a slug.
+/// `<base>-<suffix>` as a slug of at most 40 characters: both are slugged and the base is cut to make room, so the name
+/// is whole as written and teammates, who slug every name they receive, see the same one.
 pub fn joined(base: &str, suffix: &str) -> String {
-    let room = 40usize.saturating_sub(suffix.len() + 1);
-    let base = base[..base.len().min(room)].trim_end_matches('-');
-    if base.is_empty() { slug(suffix) } else { format!("{base}-{suffix}") }
+    let (base, suffix) = (slug(base), slug(suffix));
+    // A slug is ASCII, so this cuts between characters.
+    let base = base[..base.len().min(39usize.saturating_sub(suffix.len()))].trim_end_matches('-');
+    match (base.is_empty(), suffix.is_empty()) {
+        (true, _) => suffix,
+        (_, true) => base.to_string(),
+        _ => format!("{base}-{suffix}"),
+    }
 }
 
 /// Compact age: `45s`, `12m`, `3h`, `2d`.
@@ -326,6 +331,10 @@ mod tests {
         assert_eq!(joined("api", "claude"), "api-claude");
         // A dash left where the base is cut goes too.
         assert_eq!(joined(&format!("{}-b", "a".repeat(32)), "claude"), format!("{}-claude", "a".repeat(32)));
+        // Neither part needs to be a slug already: an agent name as typed, or a base that isn't ASCII.
+        assert_eq!(joined(&"Ü".repeat(45), "Üa"), format!("{}-ua", "u".repeat(37)));
+        assert_eq!(joined("api", "My Agent"), "api-my-agent");
+        assert_eq!(joined("", "claude"), "claude");
     }
 
     #[test]
