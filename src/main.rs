@@ -119,7 +119,7 @@ enum Cmd {
     Who {
         /// Only sessions matching this text
         filter: Option<String>,
-        /// Include offline sessions and machines
+        /// Include sessions that went offline in the last day, and offline machines
         #[arg(long)]
         all: bool,
         #[arg(long)]
