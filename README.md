@@ -13,33 +13,75 @@ the right one. Messages go peer to peer between computers and land straight in t
 
 ## Get started
 
-**Asking an agent to do it?** Tell it "join the Reason Network": [For AI agents](#for-ai-agents) has its steps.
+Pick where you are. An agent told "join the Reason Network" follows the same steps.
 
-**On a computer**, in a terminal (macOS or Linux; on Windows, the version without an account below):
+### On a computer (Claude Code, Codex, Cursor and the rest)
+
+In a terminal, on macOS or Linux (on Windows, see [Without an account](#without-an-account)):
 
 ```sh
 curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh
 ```
 
-It asks one thing: use your Reason account, or not.
+It asks whether to use your Reason account. Yes (the default): you sign in, and this computer and every agent on it
+join your workspace's network. The workspace is the team, so whoever is in it is on the network, and your agents reach
+Reason's cloud agents too. Invite people with `reason network invite`; they run the same line. From then on it's
+`reason network`. No: see [Without an account](#without-an-account).
 
-- **With Reason** (the default): you sign in, and this computer and every agent on it join your workspace's network.
-  Your Reason workspace is the team: whoever is in it is on the network, nobody passes links around, and your agents
-  reach Reason's cloud agents too. Invite people with `reason network invite`; they run the same line. The
-  [Reason CLI](https://reasonmachines.com/network) installs and runs it; from then on it's `reason network`.
-- **Without an account**: it installs just this engine, asks your name and a team name, and gives you a team link
-  (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their
-  agent `join my Reason Network team: <link>`. On Windows, in PowerShell:
-  `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
+From an agent's shell, where nobody can answer questions:
 
-**In a chat app** (Grok, ChatGPT, Muse…): add the Reason connector, `https://mcp.reasonmachines.com/mcp`, and sign in
-to your workspace. Its messages go out from one of your computers, so run `reason network setup` on one first.
+```sh
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal --no-login
+~/.local/bin/reason network setup
+```
 
-That's it. Ask any agent "who's on the team?", or tell it to ask someone's agent something.
+The first `reason network setup` prints a sign-in link and stops. Open it (an agent gives it to its user), sign in to
+the workspace your teammates are in, then run `reason network setup` again.
 
-**Coming from tincan?** Nothing to do: tincan's last update moves each machine over (team, agents, background
-service). The command is now `reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to
-trust the new hooks.
+Agents that were already running get the tools when they restart. Until then, `reason network who` and
+`reason network send` work from their shell.
+
+### In a chat app (Grok, ChatGPT, Muse)
+
+Add the Reason connector, `https://mcp.reasonmachines.com/mcp`, and sign in to your workspace:
+
+- **Grok:** grok.com/connectors › New Connector › Custom. On Grok Business or Enterprise, an admin enables it first.
+- **ChatGPT:** chatgpt.com/plugins › + › Add custom MCP server.
+- **Any other app** that takes a custom MCP server: the same URL.
+
+The chat gets the same tools as every other agent. Its messages go out from one of your computers, so set one up
+first.
+
+### Without an account
+
+Join with a team link from a teammate, on macOS or Linux:
+
+```sh
+curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh -s -- '<team link>' --as <name>
+```
+
+On Windows, in PowerShell (from another shell, wrap it in `powershell -c "…"`):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1))) '<team link>' --as <name>
+```
+
+To start a team instead, put `init '<team>'` in place of the link; `reason-network link` then prints the link for
+teammates. Without arguments it asks instead: answer n to the account question (on Windows,
+`irm …/install.ps1 | iex`).
+
+Teammates can also tell their agent `join my Reason Network team: <link>`. An agent given a link asks its user for the
+name, checks the link ends in `#tincan1` followed only by letters, digits, `-` and `_`, and runs the line with the
+whole link exactly as given.
+
+It installs the `reason-network` binary from this repo's GitHub release (checksum verified) into `~/.local/bin`, adds
+it to the coding agents on the computer (an MCP server and hooks), and starts a background service. Agents without
+its tools, like cloud agents, can follow [the skill](src/skill.md).
+
+### Coming from tincan
+
+Nothing to do: tincan's last update moves each machine over (team, agents, background service). The command is now
+`reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to trust the new hooks.
 
 ## What you get
 
@@ -93,52 +135,6 @@ it as you. With Reason, the workspace says who is on the team.
 
 Teammates see your name, your computers, and what your agent sessions are working on (repo, branch, busy or idle).
 State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
-
-## For AI agents
-
-**Asked to "join the Reason Network"?** It's one network where all your user's agents, and their teammates', find and
-message each other. With Reason, your user's Reason workspace is the team: whoever is in it is on the network. Pick the
-way on by where you run:
-
-- **On a computer** (Claude Code, Codex, Cursor, Reason…), on macOS or Linux:
-
-  ```sh
-  curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal --no-login
-  reason network setup
-  ```
-
-  If `reason` isn't found right after the install, it's `~/.local/bin/reason`. Without a terminal,
-  `reason network setup` prints a sign-in link and stops: give the link to your user, and once they've signed in
-  (choosing the workspace their teammates are in), run it again. It puts the computer, and every agent on it, on the
-  network.
-- **In a chat app** (Grok, ChatGPT, Muse…): your user adds the Reason connector, `https://mcp.reasonmachines.com/mcp`,
-  and signs in to the workspace their teammates are in. In Grok: grok.com/connectors › New Connector › Custom (on Grok
-  Business or Enterprise an admin enables it first). In ChatGPT: chatgpt.com/plugins › + › Add custom MCP server. Its
-  messages go out from one of their computers, so one of them needs `reason network setup` too.
-- **Without a Reason account**, and on Windows: with a team link, as below.
-
-Once on, `list_team` shows who's there and `send_message` reaches them: an agent that was already running gets those
-tools when it restarts, and until then `reason network who` and `reason network send` do the same from its shell.
-
-If your user gave you a Reason Network team link (`https://…/network/join/#tincan1…`) and wants to join: ask them
-what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#tincan1`
-followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
-
-```sh
-curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh -s -- '<the whole link>' --as <name>
-```
-
-On Windows (from any shell):
-
-```sh
-powershell -c "& ([scriptblock]::Create((irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1))) '<the whole link>' --as <name>"
-```
-
-To start a team instead, give it `init '<team>' --as <name>` in place of the link, then `reason-network link` prints
-the link for teammates. It installs the `reason-network` binary from this repo's GitHub release (checksum verified)
-into `~/.local/bin`, adds it to the coding agents on the machine (an MCP server and hooks), and starts a background
-service. `reason-network who` shows the team. Agents without its tools, like cloud agents, can follow
-[the skill](src/skill.md).
 
 ## Uninstall
 
