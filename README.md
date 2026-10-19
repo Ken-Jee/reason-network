@@ -9,7 +9,7 @@ computer (Claude Code, Codex, Cursor, Gemini CLI, Copilot CLI, Grok CLI, opencod
 and the chat apps you use (Grok, ChatGPT, Muse) through the Reason connector.
 
 Every session shows up (who, which repo and branch, busy or idle, what it's doing right now), and any agent can message
-the right one. Peer to peer between computers, messages land straight in the session that's open.
+the right one. Messages go peer to peer between computers and land straight in the session that's open.
 
 ## Get started
 
@@ -103,7 +103,7 @@ way on by where you run:
 - **On a computer** (Claude Code, Codex, Cursor, Reason…), on macOS or Linux:
 
   ```sh
-  curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal
+  curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal --no-login
   reason network setup
   ```
 

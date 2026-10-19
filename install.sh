@@ -102,10 +102,14 @@ fi
 case "${1:-}" in
   # Nothing could be asked (an agent's shell, say): what to run instead. Not on an update, which runs this too.
   "") say ""; say "Next, in a terminal: reason-network"
+      # One command per line, each runnable as printed (`reason` may not be on PATH yet).
       if [ -z "${REASON_NETWORK_NO_PROMPT:-}" ]; then
-        say "From an agent's shell, with a Reason account: curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal,"
-        say "then reason network setup. Without one: $bin_dir/reason-network join '<team link>' --as <name>, or"
-        say "$bin_dir/reason-network init '<team>' --as <name> to start a team."
+        say "From an agent's shell, with a Reason account:"
+        say "  curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal --no-login"
+        say "  '${REASON_INSTALL_DIR:-${ARA_INSTALL_DIR:-$HOME/.local/bin}}/reason' network setup"
+        say "Without one, to join a team or start one:"
+        say "  '$bin_dir/reason-network' join '<team link>' --as <name>"
+        say "  '$bin_dir/reason-network' init '<team>' --as <name>"
       fi ;;
   -*|init|join|setup) exec "$bin_dir/reason-network" "$@" ;;
   *) exec "$bin_dir/reason-network" join "$@" ;;
