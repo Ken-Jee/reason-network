@@ -78,11 +78,6 @@ It installs the `reason-network` binary from this repo's GitHub release (checksu
 it to the coding agents on the computer (an MCP server and hooks), and starts a background service. Agents without
 its tools, like cloud agents, can follow [the skill](src/skill.md).
 
-### Coming from tincan
-
-Nothing to do: tincan's last update moves each machine over (team, agents, background service). The command is now
-`reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to trust the new hooks.
-
 ## What you get
 
 - **Every agent on the team, with the same tools.** `list_team` shows who's there and what each session is doing,
