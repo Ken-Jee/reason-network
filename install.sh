@@ -100,7 +100,11 @@ if [ -z "${REASON_NETWORK_NO_PROMPT:-}" ] && (exec </dev/tty) 2>/dev/null; then
   esac
 fi
 case "${1:-}" in
-  "") say ""; say "Next, in a terminal: reason-network" ;;
+  # Nothing could be asked (an agent's shell, say): what to run instead.
+  "") say ""; say "Next, in a terminal: reason-network"
+      say "From an agent's shell: with a Reason account, install Reason (curl -fsSL https://reasonmachines.com/install.sh | bash)"
+      say "and run reason network setup. Without one, run this again with the team link and --as <name>, or with"
+      say "init '<team>' --as <name> to start a team." ;;
   -*|init|join|setup) exec "$bin_dir/reason-network" "$@" ;;
   *) exec "$bin_dir/reason-network" join "$@" ;;
 esac

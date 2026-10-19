@@ -65,7 +65,7 @@
 
   # Hand over to reason-network: it asks a few questions (name, invite code, which agents) when there's someone to ask.
   if ($args.Count -eq 0) {
-    if ($env:REASON_NETWORK_NO_PROMPT -or [Console]::IsInputRedirected) { Write-Host ''; Write-Host 'Next, in a terminal: reason-network'; return }
+    if ($env:REASON_NETWORK_NO_PROMPT -or [Console]::IsInputRedirected) { Write-Host ''; Write-Host 'Next, in a terminal: reason-network'; Write-Host "From an agent's shell: run this again with the team link and --as <name>, or with init '<team>' --as <name> to start a team."; return }
     & $exe
   } elseif ($args[0] -match '^(-.*|init|join|setup)$') {
     & $exe @args
