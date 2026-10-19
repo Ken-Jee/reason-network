@@ -182,7 +182,7 @@ pub fn default_name(agent: &str, cwd: &str, git: &GitInfo) -> String {
     let dir = git.root.as_deref().unwrap_or(cwd);
     let base = util::slug(Path::new(dir).file_name().and_then(|n| n.to_str()).unwrap_or("home"));
     let base = if base.is_empty() { "home".into() } else { base };
-    format!("{base}-{}", short(agent))
+    util::joined(&base, short(agent))
 }
 
 pub fn cwd() -> String {

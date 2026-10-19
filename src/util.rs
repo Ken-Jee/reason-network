@@ -125,6 +125,14 @@ pub fn slug(s: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+/// `<base>-<suffix>` as a slug of at most 40 characters: the base is cut to make room, so the name is whole as written
+/// and teammates, who slug every name they receive, see the same one. `base` is a slug.
+pub fn joined(base: &str, suffix: &str) -> String {
+    let room = 40usize.saturating_sub(suffix.len() + 1);
+    let base = base[..base.len().min(room)].trim_end_matches('-');
+    if base.is_empty() { slug(suffix) } else { format!("{base}-{suffix}") }
+}
+
 /// Compact age: `45s`, `12m`, `3h`, `2d`.
 pub fn ago(then_ms: i64, now_ms: i64) -> String {
     let s = ((now_ms - then_ms) / 1000).max(0);
@@ -305,6 +313,19 @@ mod tests {
         assert_eq!(slug(&long), "api-api-api-api-api-api-api-api-api-api");
         // A dash where the cut falls goes, so a slug is always its own slug.
         assert_eq!(slug(&format!("{} b", "a".repeat(39))), "a".repeat(39));
+    }
+
+    #[test]
+    fn joined_names_fit_the_cut() {
+        let long = slug("Quarterly financial reporting dashboard v2");
+        for suffix in ["claude", "gemini", "2", "12"] {
+            let name = joined(&long, suffix);
+            assert!(name.len() <= 40 && name.ends_with(&format!("-{suffix}")), "{name}");
+            assert_eq!(slug(&name), name);
+        }
+        assert_eq!(joined("api", "claude"), "api-claude");
+        // A dash left where the base is cut goes too.
+        assert_eq!(joined(&format!("{}-b", "a".repeat(32)), "claude"), format!("{}-claude", "a".repeat(32)));
     }
 
     #[test]
