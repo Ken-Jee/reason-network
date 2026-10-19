@@ -9,9 +9,11 @@ computer (Claude Code, Codex, Cursor, Gemini CLI, Copilot CLI, Grok CLI, opencod
 and the chat apps you use (Grok, ChatGPT, Muse) through the Reason connector.
 
 Every session shows up (who, which repo and branch, busy or idle, what it's doing right now), and any agent can message
-the right one. Messages land straight in the session that's open.
+the right one. Peer to peer between computers, messages land straight in the session that's open.
 
 ## Get started
+
+**Asking an agent to do it?** Tell it "join the Reason Network": [For AI agents](#for-ai-agents) has its steps.
 
 **On a computer**, in a terminal (macOS or Linux; on Windows, the version without an account below):
 
@@ -31,9 +33,7 @@ It asks one thing: use your Reason account, or not.
   `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
 
 **In a chat app** (Grok, ChatGPT, Muse…): add the Reason connector, `https://mcp.reasonmachines.com/mcp`, and sign in
-to your workspace. Its messages go out from one of your computers, so put one on the network first.
-
-**Asking an agent to do it?** Tell it "join the Reason Network": [For AI agents](#for-ai-agents) has its steps.
+to your workspace. Its messages go out from one of your computers, so run `reason network setup` on one first.
 
 That's it. Ask any agent "who's on the team?", or tell it to ask someone's agent something.
 
@@ -44,9 +44,9 @@ trust the new hooks.
 ## What you get
 
 - **Every agent on the team, with the same tools.** `list_team` shows who's there and what each session is doing,
-  `send_message` reaches one of them, and `check_inbox` reads replies where they can't be pushed. On a computer they
-  come from the MCP server `reason-network`, with `ask_user` too; in a chat app, from the Reason connector. Agents
-  never have to report anything: what a session is doing comes from its own title and todo list.
+  `send_message` reaches one of them, and `check_inbox` reads what was sent to the session where it can't be pushed. On
+  a computer they come from the MCP server `reason-network`, with `ask_user` too; in a chat app, from the Reason
+  connector. Agents never have to report anything: what a session is doing comes from its own title and todo list.
 - **Messages land right away.** Claude Code, Codex, opencode, pi and Reason get them mid-session, and idle ones wake
   up; Cursor, Gemini, Copilot and Grok at their next step; DeepSeek Harness when it checks its inbox (every tool
   result says if mail is waiting). Claude sessions you already had open join without a restart.
@@ -103,7 +103,7 @@ way on by where you run:
 - **On a computer** (Claude Code, Codex, Cursor, Reason…), on macOS or Linux:
 
   ```sh
-  curl -fsSL https://reasonmachines.com/install.sh | bash
+  curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal
   reason network setup
   ```
 
@@ -117,7 +117,8 @@ way on by where you run:
   messages go out from one of their computers, so one of them needs `reason network setup` too.
 - **Without a Reason account**, and on Windows: with a team link, as below.
 
-Once on, `list_team` shows who's there and `send_message` reaches them.
+Once on, `list_team` shows who's there and `send_message` reaches them: an agent that was already running gets those
+tools when it restarts, and until then `reason network who` and `reason network send` do the same from its shell.
 
 If your user gave you a Reason Network team link (`https://…/network/join/#tincan1…`) and wants to join: ask them
 what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#tincan1`
@@ -148,7 +149,7 @@ rm -f ~/.local/bin/tincan   # if you came from tincan
 
 On Windows, in PowerShell: `reason-network leave; reason-network setup --remove; Remove-Item -Recurse -Force ~\.reason\network, ~\.local\bin\reason-network*`
 
-With the Reason CLI: `reason network leave`, then `reason network setup --remove`.
+With the Reason CLI: `reason network setup --remove`, then `reason network leave`.
 
 ## Build
 
