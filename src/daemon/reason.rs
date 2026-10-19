@@ -3,25 +3,32 @@
 //! --network --json`: sessions of Reasons you own whose "On the network" switch is on) every few seconds, and delivers
 //! to them with `reason session send`. They reply through the Reason Network CLI, which runs here.
 //!
-//! Only one of your computers lists them, so each session is on the network once: see [`listing`]. A session that
-//! leaves the list (or every one, when this computer stops listing or can't list) leaves the network at once and is
-//! forgotten here with the mail it never read.
+//! Only one of your computers lists them, so each session is on the network once: see [`listing`]. A session a listing
+//! leaves out (its Reason left the network, or it ended) leaves the network and is forgotten here with the mail it never
+//! read. When this computer can't list them or another takes over, they leave the network too, but each keeps its name
+//! and unread mail here until a listing shows it again (or the day after which any session is forgotten).
 //!
 //! Where the Reason CLI manages this engine, the daemon also keeps the CLI's `reason network __relay` running: it
 //! carries the workspace's cloud agents' calls (Reason's hosted tools) onto the network, for as long as the daemon runs.
 
 use super::{Daemon, log};
-use crate::{agent, git::GitInfo, proto::*, team::TeamState, util};
+use crate::{agent, git::GitInfo, net::Remote, proto::*, team::TeamState, util};
 use anyhow::{Result, bail};
 use iroh::EndpointId;
 use serde_json::Value;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 const EVERY: Duration = Duration::from_secs(15);
 /// Listing failures in a row after which the sessions listed here leave the network: one is often a blip (a timeout, a
-/// token refresh) and costs the sessions and their mail nothing; two in a row (30 s) means this computer can't list
-/// them now (signed out, the API refusing), and a session must not stay reachable after its Reason left the network.
+/// token refresh); two in a row (30 s) means this computer can't list them now (signed out, the API refusing), and a
+/// session must not stay reachable after its Reason may have left the network. They keep their mail (see the top).
 const FAILURES: u32 = 2;
+/// How long a restarted daemon looks for another computer of yours to come online before listing.
+const LINKS_WAIT: Duration = Duration::from_secs(5);
 /// The relay is started again this long after it stops, doubling up to `RELAY_MAX_WAIT` while it keeps stopping.
 const RELAY_WAIT: Duration = Duration::from_secs(30);
 const RELAY_MAX_WAIT: Duration = Duration::from_secs(600);
@@ -29,10 +36,18 @@ const RELAY_MAX_WAIT: Duration = Duration::from_secs(600);
 impl Daemon {
     pub(super) async fn reason_loop(self: Arc<Self>) {
         let mut round = Round::default();
-        // Just started, this computer doesn't yet see which of your others list your Reason sessions: with any others,
-        // it waits a round for their presence, so a restart doesn't put each session on the network twice.
+        // Just started, this computer doesn't yet see which of your others lists your Reason sessions. With another of
+        // yours online, it waits a round for that one's presence, so a restart doesn't put each session on the network
+        // twice; alone (or with the others offline) it lists at once. Links take a moment to come up, so it looks for
+        // them a few seconds first, where the roster has others of yours.
         if self.others_of_mine() {
-            tokio::time::sleep(EVERY).await;
+            let until = tokio::time::Instant::now() + LINKS_WAIT;
+            while !self.others_online() && tokio::time::Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            if self.others_online() {
+                tokio::time::sleep(EVERY).await;
+            }
         }
         loop {
             match self.reason_sync(&mut round).await {
@@ -44,7 +59,7 @@ impl Daemon {
                     }
                     if round.failures >= FAILURES {
                         round.listed.clear();
-                        self.drop_reason_sessions(&HashSet::new());
+                        self.drop_reason_sessions(&HashSet::new(), None);
                     }
                 }
             }
@@ -102,7 +117,7 @@ impl Daemon {
         let bin = agent::find_bin("reason").filter(|_| which != Listing::None);
         let Some(bin) = bin else {
             round.listed.clear();
-            self.drop_reason_sessions(&HashSet::new());
+            self.drop_reason_sessions(&HashSet::new(), None);
             return Ok(());
         };
         // A Reason CLI older than `--network` refuses the flag: a failure like any other (see FAILURES).
@@ -119,6 +134,7 @@ impl Daemon {
         let id = |s: &Value| s["session_id"].as_str().or(s["id"].as_str()).map(str::to_string);
         let live = on_network(&list);
         let listed: HashSet<String> = live.iter().filter_map(|s| id(s)).collect();
+        let listing_ok = listed.clone();
         // Behind a computer of yours that could list them but shows none, a session goes on from here once it has been
         // listed twice: by then that computer has put it on the network if it can.
         let live: Vec<&Value> = match which {
@@ -169,14 +185,15 @@ impl Daemon {
                 }
             }
         }
-        self.drop_reason_sessions(&seen);
+        self.drop_reason_sessions(&seen, Some(&listing_ok));
         Ok(())
     }
 
-    /// Takes the Reason sessions here that aren't in `keep` off the network now, forgetting each with the mail it never
-    /// read: it left because its Reason left the network, ended, or another of your computers lists it, and its name
-    /// must not hold mail here for a day.
-    fn drop_reason_sessions(&self, keep: &HashSet<String>) {
+    /// Takes the Reason sessions here that aren't in `keep` off the network now. With the ids a listing just returned
+    /// (`listed`), one it left out is forgotten with the mail it never read ([`forgets`]); any other keeps its name and
+    /// mail here, for when a listing shows it again.
+    fn drop_reason_sessions(&self, keep: &HashSet<String>, listed: Option<&HashSet<String>>) {
+        let now = util::now_ms();
         let mut g = self.inner.lock().unwrap();
         let gone: Vec<String> = g
             .live
@@ -186,7 +203,12 @@ impl Daemon {
             .collect();
         for key in &gone {
             if let Some(l) = g.live.remove(key) {
-                let _ = g.store.forget_session(&l.name, &self.person);
+                let id = l.reg.agent_session_id.as_deref().unwrap_or_default();
+                let _ = if forgets(listed, id) {
+                    g.store.forget_session(&l.name, &self.person)
+                } else {
+                    g.store.touch_session(&l.name, now)
+                };
             }
         }
         drop(g);
@@ -205,21 +227,40 @@ struct Round {
     listed: HashSet<String>,
 }
 
+/// Whether a Reason session leaving the network here is forgotten with its unread mail: only when a listing succeeded
+/// (`listed`, the ids it returned) and left it out, which is its Reason leaving the network or it ending. Taken off
+/// because this computer can't list now, or because another took over, it keeps both: senders were told their mail
+/// arrived, and it goes in when a listing shows the session again.
+fn forgets(listed: Option<&HashSet<String>>, id: &str) -> bool {
+    listed.is_some_and(|listed| !listed.contains(id))
+}
+
 impl Daemon {
     /// How this computer lists your Reason sessions this round: see [`listing`].
     fn reason_listing(&self) -> Listing {
         let (Some(net), Some(team)) = (self.net(), self.team_state()) else { return Listing::All };
+        let shows = self.inner.lock().unwrap().live.values().any(|l| l.reg.agent == "reason");
         let mine = net
             .remotes()
             .into_iter()
             .filter(|(id, r)| r.online && team.member(id).is_some_and(|m| m.active && m.person == self.person))
             .map(|(id, r)| (id, r.presence.sessions.iter().any(|s| s.agent == "reason")));
-        listing(self.key.public(), mine)
+        listing(self.key.public(), shows, mine)
     }
 
     fn others_of_mine(&self) -> bool {
         self.team_state().is_some_and(|t| others_of_mine(&t, &self.person, self.key.public()))
     }
+
+    fn others_online(&self) -> bool {
+        let (Some(net), Some(team)) = (self.net(), self.team_state()) else { return false };
+        others_online(&net.remotes(), &team, &self.person)
+    }
+}
+
+/// Whether another active computer of `person`'s is online now: a restart waits a round for its presence.
+fn others_online(remotes: &HashMap<EndpointId, Remote>, team: &TeamState, person: &str) -> bool {
+    remotes.iter().any(|(id, r)| r.online && team.member(id).is_some_and(|m| m.active && m.person == person))
 }
 
 /// Whether the roster has another active computer of `person`'s besides `me`.
@@ -237,20 +278,20 @@ enum Listing {
     Seen,
 }
 
-/// Your Reason sessions are listed by the first of your computers online now (`mine`, besides this one, each with
-/// whether it shows a Reason session) that can list them, in key order: so each is on the network once however many
-/// computers you have. A computer with a smaller key that shows a Reason session lists them, so this one lists none.
-/// One that shows none either has none on the network or can't list them (no Reason CLI, signed out, a CLI too old):
-/// this one lists, but puts a session on only once it has been listed twice ([`Listing::Seen`]), giving that computer
-/// a round to show it. Every computer works this out alike from the roster and the presence it already gets; when the
-/// first stops showing them (offline, or it can no longer list), the next takes over within a round or two. (A Reason
-/// session runs in Reason's cloud, on none of them: any one can carry it.) Two computers can still show the same
-/// session for a round while they find out; the later one then drops it.
-fn listing(me: EndpointId, mine: impl IntoIterator<Item = (EndpointId, bool)>) -> Listing {
-    let before: Vec<bool> = mine.into_iter().filter(|(id, _)| *id < me).map(|(_, shows)| shows).collect();
-    if before.iter().any(|shows| *shows) {
+/// Which of your computers lists your Reason sessions, so each is on the network once however many computers you have.
+/// The one already showing them keeps listing them (`shows`, and for the others online now, `mine`): a computer that
+/// shows none lists none while another shows them, so the sessions don't move, or change names, each time a computer
+/// comes back. Only two that both show them (for the round they find out) settle it by key order. With none showing
+/// them, the first in key order lists them all; one that sorts later lists too, but puts a session on only once it has
+/// been listed twice ([`Listing::Seen`]), giving the earlier one a round to show it. A computer that can't list them
+/// (no Reason CLI, signed out, a CLI too old) shows none, so the next takes over within a round or two. Every computer
+/// works this out alike from the roster and the presence it already gets. (A Reason session runs in Reason's cloud, on
+/// none of them: any one can carry it.)
+fn listing(me: EndpointId, shows: bool, mine: impl IntoIterator<Item = (EndpointId, bool)>) -> Listing {
+    let mine: Vec<(EndpointId, bool)> = mine.into_iter().collect();
+    if mine.iter().any(|(id, other)| *other && (!shows || *id < me)) {
         Listing::None
-    } else if before.is_empty() {
+    } else if shows || mine.iter().all(|(id, _)| me < *id) {
         Listing::All
     } else {
         Listing::Seen
@@ -304,31 +345,60 @@ mod tests {
     }
 
     #[test]
-    fn the_first_of_your_computers_that_shows_them_lists_them() {
+    fn the_computer_already_listing_them_keeps_them() {
         let mut keys: Vec<EndpointId> = (0..3).map(|_| SecretKey::generate().public()).collect();
         keys.sort();
         let (first, second, third) = (keys[0], keys[1], keys[2]);
-        // Alone, or first in key order, a computer lists them all.
-        assert_eq!(listing(second, []), Listing::All);
-        assert_eq!(listing(first, [(second, true), (third, true)]), Listing::All);
-        // Behind one that shows a Reason session, it lists none.
-        assert_eq!(listing(second, [(first, true), (third, false)]), Listing::None);
-        assert_eq!(listing(third, [(first, true), (second, false)]), Listing::None);
-        // Behind ones that show none (none on the network, or they can't list), it lists, a session at its second
-        // listing; so the first that can't list (no CLI, signed out) doesn't leave them off the network.
-        assert_eq!(listing(second, [(first, false), (third, true)]), Listing::Seen);
-        assert_eq!(listing(third, [(first, false), (second, false)]), Listing::Seen);
-        // The first goes offline: the next one takes over.
-        assert_eq!(listing(second, [(third, false)]), Listing::All);
-        // Once the first shows them, exactly one of the three lists them.
-        let shows = |k: EndpointId| k == first;
-        let listers = keys
-            .iter()
-            .filter(|&&me| {
-                listing(me, keys.iter().copied().filter(|&k| k != me).map(|k| (k, shows(k)))) != Listing::None
-            })
-            .count();
-        assert_eq!(listers, 1);
+        // With none showing them: alone or first in key order, a computer lists them all; later ones list a session
+        // once it has been listed twice, so the first that can list them gets a round to show it.
+        assert_eq!(listing(second, false, []), Listing::All);
+        assert_eq!(listing(first, false, [(second, false), (third, false)]), Listing::All);
+        assert_eq!(listing(third, false, [(first, false), (second, false)]), Listing::Seen);
+        // One shows them (it took over while the first couldn't list): it keeps them, whatever its key, and the first,
+        // back or able again, lists none. So the sessions don't move, or change names, each time a computer comes back.
+        assert_eq!(listing(first, false, [(second, true), (third, false)]), Listing::None);
+        assert_eq!(listing(third, false, [(first, false), (second, true)]), Listing::None);
+        assert_eq!(listing(second, true, [(first, false), (third, false)]), Listing::All);
+        // Two that both show them (the round they find out) settle it by key order.
+        assert_eq!(listing(first, true, [(second, true)]), Listing::All);
+        assert_eq!(listing(second, true, [(first, true)]), Listing::None);
+        // The one showing them goes offline (or stops, unable to list): the others take over.
+        assert_eq!(listing(first, false, [(third, false)]), Listing::All);
+        // Whichever shows them, exactly one of the three lists them.
+        for lister in [first, second, third] {
+            let listers = keys
+                .iter()
+                .filter(|&&me| {
+                    let others = keys.iter().copied().filter(|&k| k != me).map(|k| (k, k == lister));
+                    listing(me, me == lister, others) != Listing::None
+                })
+                .count();
+            assert_eq!(listers, 1);
+        }
+    }
+
+    #[test]
+    fn only_a_listing_that_leaves_a_session_out_forgets_it_and_its_mail() {
+        let listed: HashSet<String> = ["still-on".to_string()].into();
+        // Its Reason left the network, or it ended: forgotten with its mail.
+        assert!(forgets(Some(&listed), "switched-off"));
+        assert!(!forgets(Some(&listed), "still-on"));
+        // Listing failed, or another computer took over: it keeps its name and the mail senders were told arrived.
+        assert!(!forgets(None, "switched-off"));
+    }
+
+    #[test]
+    fn a_restart_waits_a_round_only_while_another_computer_of_yours_is_online() {
+        let (me, other, theirs) = (SecretKey::generate(), SecretKey::generate(), SecretKey::generate());
+        let mut team = TeamState::found("acme", "alex", "laptop", &me);
+        team.put_member(&me, other.public(), "alex", "desktop", true);
+        team.put_member(&me, theirs.public(), "sam", "desk", true);
+        let remote = |online: bool| Remote { presence: Default::default(), last_seen: 0, online };
+        // Your other computer is in the roster but offline: no one else lists them, so no wait.
+        assert!(!others_online(&HashMap::from([(other.public(), remote(false))]), &team, "alex"));
+        // A teammate's computer online changes nothing.
+        assert!(!others_online(&HashMap::from([(theirs.public(), remote(true))]), &team, "alex"));
+        assert!(others_online(&HashMap::from([(other.public(), remote(true))]), &team, "alex"));
     }
 
     #[test]

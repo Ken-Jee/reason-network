@@ -3,8 +3,14 @@
 
 use super::{Daemon, Inner, Live, log};
 use crate::{agent, git::GitInfo, proto::*, render, store::Remembered, util};
+use crate::{net::Remote, team::TeamState};
 use anyhow::{Result, anyhow, bail};
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use iroh::EndpointId;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 /// A hook-only session that hasn't fired a hook for this long is considered gone.
 const HOOK_TTL_MS: i64 = 6 * 3_600_000;
@@ -40,7 +46,7 @@ impl Daemon {
         git: GitInfo,
     ) -> Result<(Registered, (String, Vec<Message>))> {
         let now = util::now_ms();
-        let others = self.my_names_elsewhere();
+        let others = self.my_names_elsewhere(reg.agent == "reason");
         let mut g = self.inner.lock().unwrap();
         let g = &mut *g;
         let key = reg.key.clone();
@@ -89,19 +95,17 @@ impl Daemon {
         Ok((Registered { name, address, unread: pending.len() as u32 }, (key, wake)))
     }
 
-    /// Session names in use on my other machines, so my addresses stay unique across them.
-    fn my_names_elsewhere(&self) -> HashSet<String> {
+    /// Session names in use on my other machines, so my addresses stay unique across them. With `online_only`, only on
+    /// the ones online now: a Reason session another of mine listed before going offline is listed here now, under the
+    /// same name.
+    fn my_names_elsewhere(&self, online_only: bool) -> HashSet<String> {
         let Some(net) = self.net() else { return HashSet::new() };
         let Some(team) = self.team_state() else { return HashSet::new() };
-        net.remotes()
-            .into_iter()
-            .filter(|(id, _)| team.member(id).is_some_and(|m| m.person == self.person))
-            .flat_map(|(_, r)| r.presence.sessions.into_iter().map(|s| s.name))
-            .collect()
+        names_elsewhere(net.remotes(), &team, &self.person, online_only)
     }
 
     pub(super) fn set_status(&self, key: &str, doing: Option<String>, name: Option<String>) -> Result<Registered> {
-        let others = self.my_names_elsewhere();
+        let others = self.my_names_elsewhere(false);
         let mut g = self.inner.lock().unwrap();
         let g = &mut *g;
         let new_name = match name.as_deref().map(util::slug) {
@@ -304,6 +308,20 @@ fn remembered(l: &Live, now: i64) -> Remembered {
 
 /// Reuse this session's previous name, else `<repo>-<agent>` (inheriting it and its mail if it is stale),
 /// else the first free `-2`, `-3`, …
+/// The names `person`'s sessions use on their other machines (`remotes`), only the online ones with `online_only`.
+fn names_elsewhere(
+    remotes: HashMap<EndpointId, Remote>,
+    team: &TeamState,
+    person: &str,
+    online_only: bool,
+) -> HashSet<String> {
+    remotes
+        .into_iter()
+        .filter(|(id, r)| (r.online || !online_only) && team.member(id).is_some_and(|m| m.person == person))
+        .flat_map(|(_, r)| r.presence.sessions.into_iter().map(|s| s.name))
+        .collect()
+}
+
 fn pick_name(g: &Inner, reg: &SessionReg, git: &GitInfo, elsewhere: &HashSet<String>) -> Result<String> {
     let taken = |n: &str| g.live.values().any(|l| l.name == n) || elsewhere.contains(n);
     if let Some(r) = g.store.session_by_key(&reg.key)?
@@ -321,4 +339,50 @@ fn pick_name(g: &Inner, reg: &SessionReg, git: &GitInfo, elsewhere: &HashSet<Str
         return Ok(base);
     }
     Ok((2..).map(|i| util::joined(&base, &i.to_string())).find(|n| !taken(n)).expect("some suffix is free"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::Presence;
+    use iroh::SecretKey;
+
+    fn showing(name: &str) -> SessionInfo {
+        SessionInfo {
+            address: format!("alex/{name}"),
+            name: name.into(),
+            person: "alex".into(),
+            machine: "laptop".into(),
+            agent: "reason".into(),
+            cwd: "~".into(),
+            repo: None,
+            branch: None,
+            status: "idle".into(),
+            since: None,
+            doing: None,
+            tier: Tier::Push,
+            unread: 0,
+            is_me: false,
+        }
+    }
+
+    #[test]
+    fn a_reason_session_taken_over_keeps_its_name_from_an_offline_computer() {
+        let (me, laptop) = (SecretKey::generate(), SecretKey::generate());
+        let mut team = TeamState::found("acme", "alex", "desktop", &me);
+        team.put_member(&me, laptop.public(), "alex", "laptop", true);
+        let remote = |online: bool| Remote {
+            presence: Presence { sessions: vec![showing("billing-reason")], known: Vec::new() },
+            last_seen: 0,
+            online,
+        };
+        // The laptop listed it, then went offline: its last presence still names it. Naming the Reason session here
+        // ignores that, so it keeps its name; any other session still steers clear of it.
+        let offline = HashMap::from([(laptop.public(), remote(false))]);
+        assert!(!names_elsewhere(offline.clone(), &team, "alex", true).contains("billing-reason"));
+        assert!(names_elsewhere(offline, &team, "alex", false).contains("billing-reason"));
+        // Online, its names are taken either way.
+        let online = HashMap::from([(laptop.public(), remote(true))]);
+        assert!(names_elsewhere(online, &team, "alex", true).contains("billing-reason"));
+    }
 }

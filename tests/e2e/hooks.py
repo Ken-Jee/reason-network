@@ -221,15 +221,23 @@ back = reason_listed(True, 30)
 time.sleep(1)
 check("…so it comes back with no mail held for it", back and "while it was off" not in open(reason_log).read(),
       open(reason_log).read()[-300:])
-# Listing fails (signed out, the API refusing): one failure is a blip; at the second in a row it leaves.
+# Listing fails (signed out, the API refusing): one failure is a blip; at the second in a row it leaves the network.
+# It keeps its name and unread mail here: mail sent meanwhile is held, and goes in once a listing shows it again.
 open(list_fails, "w").close()
 started = time.time()
 gone = reason_listed(False, 60)
 took = time.time() - started
 out = run("who", "--all")
-check("a Reason session leaves the network once listing fails twice in a row",
-      gone and took > 10 and "fix-flaky-billing-reason" not in out, f"took {took:.0f}s; {out}")
+sent = run("send", "fix-flaky-billing-reason", "reason: while listing was down")
+check("a Reason session leaves the network once listing fails twice in a row, keeping its name",
+      gone and took > 10 and "fix-flaky-billing-reason" in out and "no session called" not in sent, f"took {took:.0f}s; {out}; {sent}")
 os.remove(list_fails)
+back = reason_listed(True, 30)
+deadline = time.time() + 10
+while time.time() < deadline and "while listing was down" not in open(reason_log).read():
+    time.sleep(0.5)
+check("…and the mail held for it goes in once a listing shows it again",
+      back and "while listing was down" in open(reason_log).read(), open(reason_log).read()[-300:])
 
 # A Claude session that was open before Reason Network was set up: no restart needed. It's on the team at once, gets
 # messages through its own socket, and replies with the CLI.
