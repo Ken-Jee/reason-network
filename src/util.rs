@@ -120,7 +120,9 @@ pub fn slug(s: &str) -> String {
             out.push('-');
         }
     }
-    out.trim_end_matches('-').chars().take(40).collect()
+    // `out` is ASCII, so this cuts between characters; a dash left at the cut goes too.
+    out.truncate(40);
+    out.trim_end_matches('-').to_string()
 }
 
 /// Compact age: `45s`, `12m`, `3h`, `2d`.
@@ -300,7 +302,9 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "slowed by input it never keeps");
         // The cut is the same as slugging everything first.
         let long = "api ".repeat(100);
-        assert_eq!(slug(&long), long.trim().replace(' ', "-").chars().take(40).collect::<String>());
+        assert_eq!(slug(&long), "api-api-api-api-api-api-api-api-api-api");
+        // A dash where the cut falls goes, so a slug is always its own slug.
+        assert_eq!(slug(&format!("{} b", "a".repeat(39))), "a".repeat(39));
     }
 
     #[test]
