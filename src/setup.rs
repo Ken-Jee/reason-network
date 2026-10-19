@@ -1433,9 +1433,8 @@ pub async fn doctor() -> Result<()> {
             let others = t.machines.len().saturating_sub(1);
             println!("✓ daemon running; team {} with {others} other machine(s), {online} connected", t.name);
             print!("{}", render::team(&t).lines().skip(1).map(|l| format!("{l}\n")).collect::<String>());
-            if let Some(relay) = &t.relay
-                && t.relay_connected == Some(false)
-            {
+            if t.relay_connected == Some(false) {
+                let relay = t.relay.clone().unwrap_or_else(render::default_relays);
                 println!(
                     "  ! can't reach the team's relay {relay}: until it's up, teammates are only found on this network"
                 );
@@ -1448,7 +1447,7 @@ pub async fn doctor() -> Result<()> {
                 println!(
                     "  ! if the team changed relays while this machine was off, set the same one here: `{CLI} relay <url>`"
                 );
-                println!("    (or `default` for n0's); `{CLI} team` on a teammate's machine shows which");
+                println!("    (or `default` for Reason's); `{CLI} team` on a teammate's machine shows which");
             }
         }
         Err(e) if e.to_string().contains("not in a team") => {

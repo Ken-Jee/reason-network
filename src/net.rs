@@ -36,6 +36,12 @@ const MAX_FRAME: usize = 4 << 20;
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Two machines that dial each other at once open their connections within this long of each other.
 const DIALED_TOGETHER: Duration = Duration::from_secs(5);
+/// The relays of a team that doesn't run its own: Reason's. n0's public ones are rate-limited and meant for testing.
+pub const DEFAULT_RELAYS: &[&str] = &["https://relay-sfo1.compute.reasonmachines.com"];
+
+pub fn default_relays() -> Vec<RelayUrl> {
+    DEFAULT_RELAYS.iter().map(|u| u.parse().expect("default relays are urls")).collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -96,8 +102,8 @@ struct Link {
 
 pub struct Net {
     endpoint: Endpoint,
-    /// The team's own relay, if it has one: teammates are dialed through it, as nothing looks them up on n0's DNS.
-    relay: Option<RelayUrl>,
+    /// Where teammates are dialed: the team's own relay (nothing looks them up on n0's DNS then), or the default ones.
+    relays: Vec<RelayUrl>,
     router: Mutex<Option<Router>>,
     /// Endpoints listening for joins on behalf of invite codes, by their (code-derived) id.
     invites: Mutex<HashMap<EndpointId, Router>>,
@@ -115,7 +121,9 @@ pub struct Net {
 
 pub async fn bind(key: SecretKey, relay: Option<&str>, lan: bool) -> Result<Endpoint> {
     let Some(url) = relay else {
-        let mut b = Endpoint::builder(presets::N0).secret_key(key);
+        // The default relays, with n0's address lookup still: that is how a teammate on an older Reason Network (on
+        // n0's relays) and this machine find each other, and what four-word codes need.
+        let mut b = Endpoint::builder(presets::N0).secret_key(key).relay_mode(RelayMode::custom(default_relays()));
         if lan {
             b = b.address_lookup(MdnsAddressLookup::builder());
         }
@@ -320,7 +328,7 @@ impl Net {
             )),
             invites: Default::default(),
             endpoint,
-            relay: relay.and_then(|u| u.parse().ok()),
+            relays: relay.map_or_else(default_relays, |u| u.parse().into_iter().collect()),
             daemon: Arc::downgrade(daemon),
             links: Default::default(),
             remote: Mutex::new(remote),
@@ -483,8 +491,9 @@ impl Net {
     }
 
     async fn dial(self: Arc<Self>, id: EndpointId) {
+        // On the default relays, n0's address lookup runs too: a teammate may be on n0's (an older Reason Network).
         let mut addr = EndpointAddr::new(id);
-        if let Some(url) = &self.relay {
+        for url in &self.relays {
             addr = addr.with_relay_url(url.clone());
         }
         match tokio::time::timeout(Duration::from_secs(20), self.endpoint.connect(addr, ALPN)).await {
@@ -703,6 +712,14 @@ fn tidy_presence(mut p: Presence) -> Presence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_relay_is_reasons_and_none_of_n0s() {
+        let relays = default_relays();
+        assert_eq!(relays.len(), DEFAULT_RELAYS.len());
+        assert_eq!(relays[0].to_string(), "https://relay-sfo1.compute.reasonmachines.com/");
+        assert!(relays.iter().all(|u| u.scheme() == "https" && !u.as_str().contains(".n0.iroh.link")));
+    }
 
     #[test]
     fn a_stale_connection_is_replaced_but_a_simultaneous_dial_is_dropped() {

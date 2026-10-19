@@ -510,7 +510,10 @@ impl Daemon {
         self.restart_soon();
         let (now, cmd) = match &url {
             Some(u) => (format!("The team now uses relay {u}, and nothing of n0's."), format!("{CLI} relay {u}")),
-            None => ("The team now uses n0's public relays.".into(), format!("{CLI} relay default")),
+            None => (
+                format!("The team now uses relay {}.", crate::render::default_relays()),
+                format!("{CLI} relay default"),
+            ),
         };
         let mut out = format!("{now} Team links from before stop working: `{CLI} link` shows the new one.");
         // A machine that is off can't hear about it, and won't find the team where it looks when it's back.

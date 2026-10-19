@@ -65,8 +65,9 @@ With the Reason CLI, `reason network who` and `reason network send` work too, an
 
 Each computer runs a small daemon. Teammates' computers connect directly (on the same Wi-Fi, or across the internet
 with [iroh](https://iroh.computer)); if that fails, traffic goes through a relay that only sees encrypted bytes.
-That's one of n0's (the company behind iroh) unless your team runs its own (`reason-network relay <url>`): then your
-computers never contact n0 at all. Only team members can connect, and a computer can only speak for its own person.
+That's Reason's, with computers finding each other through the address lookup of n0 (the company behind iroh), unless
+your team runs its own relay (`reason-network relay <url>`): then your computers contact nothing else, n0 included.
+Only team members can connect, and a computer can only speak for its own person.
 Messages to someone offline wait and go out when they're back.
 
 Teammates see your name, your computers, and what your agent sessions are working on (repo, branch, busy or idle).

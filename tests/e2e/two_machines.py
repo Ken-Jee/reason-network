@@ -5,7 +5,7 @@
 Needs internet (iroh relays/discovery). Run inside a Claude Code session, the simulated Claude session pushes its
 test messages into that real session (they say "ignore this").
 """
-import json, os, re, subprocess, tempfile, time
+import base64, json, os, re, subprocess, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.path.join(ROOT, "target", "debug", "reason-network")
@@ -89,6 +89,18 @@ def shown(who):
     time.sleep(0.5)
     p = os.path.join(D, f"notify-{who}.log")
     return open(p).read() if os.path.exists(p) else ""
+
+
+def link_relays(link):
+    """A team link's relay fields: the team's own, and the inviting machine's (0xFF: one of n0's, by region)."""
+    t = link.split("#tincan1")[1]
+    raw, at, fields = base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)), 32, []
+    for _ in range(3):  # the team name first
+        short = raw[at] == 0xFF
+        at += short
+        fields.append(("n0 " if short else "") + raw[at + 1:at + 1 + raw[at]].decode())
+        at += 1 + raw[at]
+    return fields[1:]
 os.makedirs(os.path.join(D, "work"), exist_ok=True)
 
 # --- team formation ---
@@ -102,6 +114,8 @@ check("join with the team link succeeds", "Joined team vibes as alice on desktop
 check("joiner sees alex connected", re.search(r"alex\s+laptop\s+(direct|relay)", out) is not None, out)
 out = cli("alex", "team")
 check("founder sees alice connected", re.search(r"alice\s+desktop\s+(direct|relay)", out) is not None, out)
+check("a team without a relay of its own is on Reason's: the link names it as where alex is",
+      link_relays(link.group(1)) == ["", "https://relay-sfo1.compute.reasonmachines.com/"] and "(Reason's, the default)" in out, out)
 out = cli("alice", "join", link.group(1), "--as", "bob", "--no-setup")
 check("joining a second team is refused while yours has others, and says how to switch",
       "already in team 'vibes' (with alex)" in out and "reason-network leave" in out, out)

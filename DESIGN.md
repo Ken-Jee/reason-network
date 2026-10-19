@@ -87,13 +87,19 @@ SDK) both exist and work today. Zig has neither, which is why agent-rpc's MCP sh
 **Transport: iroh 1.3.** Each daemon is an iroh `Endpoint` with a persistent secret key
 (`~/.reason/network/machine.key`). Peers are dialed by `EndpointId`; iroh resolves addresses via n0 DNS/pkarr, finds
 LAN peers with `iroh-mdns-address-lookup` (works with no internet), hole-punches, and falls back to a relay
-over HTTPS. Default relays are n0's public ones (they only see encrypted QUIC). A team can set its own relay
+over HTTPS. Relays only see encrypted QUIC. The default relay is Reason's (`DEFAULT_RELAYS` in `src/net.rs`, a list
+so more regions can join), as n0's public relays are rate-limited and meant for development. A team without its own
+relay still looks addresses up on n0's DNS, where each machine publishes its home relay: that is how a machine on
+Reason's relay and one of an older build, on n0's, find each other (iroh dials a peer through whichever relay it is
+on), and what a four-word code needs. Teammates are also dialed through the default relay itself, so machines of this
+build find each other even without that lookup. A team can set its own relay
 (`reason-network relay <url>` or `reason-network init --relay <url>`; the `iroh-relay` binary on any VPS, Let's Encrypt on :443,
 access limited to the roster's endpoint ids). Then its machines never contact n0: they use only that relay
 (teammates are dialed through it) and mDNS on the LAN, and invites come in the long form, since a four-word code
 needs n0's lookup. A machine that was off while the team switched relays can't find it on its own; `reason-network doctor`
 there says to set the same relay with `reason-network relay`.
-That is the "HTTPS and local network, MagicDNS style" requirement with one stack and no server we must run.
+That is the "HTTPS and local network, MagicDNS style" requirement with one stack, and a relay as the only server
+(Reason's, or the team's own).
 
 **Roster (membership).** Replicated to every machine, every entry signed by a member machine's key:
 - *admissions*: how each machine got in (the founder's self-signed entry, then each admission signed by an
@@ -254,8 +260,8 @@ not approve. Nothing changes how an agent works when it isn't messaging.
   terminal, or `--from <you>/terminal` from a script. A machine also refuses a group message from a teammate's agent
   (an older Reason Network's). It doesn't stop a teammate's agent from messaging your sessions one by one; the loop guard
   and the inbound policy cover that.
-- Nothing is sent to any service we run. Relays see ciphertext only. With its own relay, a team's machines never
-  contact n0 either.
+- Relays see ciphertext only (and which machines talk to which); the default one is Reason's. With its own relay, a
+  team's machines contact neither Reason's relay nor n0.
 
 ## Install UX (M3)
 

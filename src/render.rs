@@ -193,10 +193,15 @@ fn link(m: &MachineInfo, now: i64) -> String {
     m.last_seen.map_or_else(|| "not seen yet".to_string(), |t| format!("offline {}", util::ago(t, now)))
 }
 
+/// What a team that doesn't run its own relay uses.
+pub fn default_relays() -> String {
+    format!("{} (Reason's, the default)", crate::net::DEFAULT_RELAYS.join(", "))
+}
+
 pub fn team(t: &TeamInfo) -> String {
     let now = util::now_ms();
     let mut out = String::new();
-    let relay = t.relay.as_deref().unwrap_or("n0 public relays");
+    let relay = t.relay.clone().unwrap_or_else(default_relays);
     let _ = writeln!(out, "team {} · relay: {relay}", t.name);
     let pw = t.machines.iter().map(|m| m.person.chars().count()).max().unwrap_or(0);
     let mw = t.machines.iter().map(|m| m.machine.chars().count()).max().unwrap_or(0);
@@ -360,6 +365,24 @@ pub fn unread_notice(u: &Unread) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_team_shows_its_relay_or_the_default() {
+        let mut t = TeamInfo {
+            name: "vibes".into(),
+            relay: None,
+            relay_connected: None,
+            person: "alex".into(),
+            machine: "mbp".into(),
+            machines: Vec::new(),
+        };
+        assert_eq!(
+            team(&t),
+            "team vibes · relay: https://relay-sfo1.compute.reasonmachines.com (Reason's, the default)\n"
+        );
+        t.relay = Some("https://relay.example.com".into());
+        assert_eq!(team(&t), "team vibes · relay: https://relay.example.com\n");
+    }
 
     #[test]
     fn frames_cant_be_broken() {
