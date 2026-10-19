@@ -148,13 +148,15 @@ check("an agent shell Reason Network doesn't know sends as <me>/terminal", 'from
 # Reason: its agent runs in the cloud; Reason Network lists the live sessions and sends with its CLI.
 fake_reason, reason_log = os.path.join(D, "fake-reason.sh"), os.path.join(D, "reason.log")
 listing = {"items": [
-    {"session_id": "r-1", "status": "running", "title": "Fix flaky billing test", "repo": None, "branch": "reason/task-r1", "finished_at": None, "is_archived": False},
-    {"session_id": "r-2", "status": "exit", "title": "Something finished", "finished_at": "2026-10-01T00:00:00Z", "is_archived": False},
+    {"session_id": "r-1", "status": "running", "title": "Fix flaky billing test", "repo": None, "branch": "reason/task-r1", "finished_at": None, "is_archived": False, "on_network": True},
+    {"session_id": "r-2", "status": "exit", "title": "Something finished", "finished_at": "2026-10-01T00:00:00Z", "is_archived": False, "on_network": True},
+    {"session_id": "r-3", "status": "running", "title": "Under a Reason shared with you", "finished_at": None, "is_archived": False, "on_network": False},
+    {"session_id": "r-4", "status": "running", "title": "From an older server", "finished_at": None, "is_archived": False},
 ]}
 fail_next = os.path.join(D, "reason-fail-next")
 with open(fake_reason, "w") as f:
     f.write(f"""#!/bin/sh
-if [ "$1 $2" = "session list" ]; then echo '{json.dumps(listing)}'; exit 0; fi
+if [ "$1 $2 $3" = "session list --network" ]; then echo '{json.dumps(listing)}'; exit 0; fi
 if [ -f {fail_next} ]; then rm {fail_next}; echo "not signed in" >&2; exit 1; fi
 printf '%s\\n' "$*" >> {reason_log}
 """)
@@ -171,6 +173,7 @@ time.sleep(2)
 out = run("who")
 check("live Reason sessions are listed with their title, finished ones aren't",
       "fix-flaky-billing-reason" in out and "↳ Fix flaky billing test" in out and "Something finished" not in out, out)
+check("…only those the list puts on the network", "shared with you" not in out and "older server" not in out, out)
 out = run("send", "fix-flaky-billing-reason", "reason: the billing test is flaky on main too")
 time.sleep(1)
 sent = open(reason_log).read() if os.path.exists(reason_log) else ""

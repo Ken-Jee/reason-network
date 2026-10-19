@@ -1,6 +1,9 @@
 //! Reason sessions. Reason's agent runs in its cloud, so there is no hook or MCP server here: when `reason` is on
-//! (`reason network setup`), the daemon lists your live Reason sessions (`reason session list --json`) every few seconds,
-//! and delivers to them with `reason session send`. They reply through the Reason Network CLI, which runs here.
+//! (`reason network setup`), the daemon lists your live Reason sessions that are on the network (`reason session list
+//! --network --json`: sessions of Reasons you own whose "On the network" switch is on) every few seconds, and delivers
+//! to them with `reason session send`. They reply through the Reason Network CLI, which runs here.
+//!
+//! Only one of your computers lists them, so each session is on the network once: see [`carries`].
 //!
 //! Where the Reason CLI manages this engine, the daemon also keeps the CLI's `reason network __relay` running: it
 //! carries the workspace's cloud agents' calls (Reason's hosted tools) onto the network, for as long as the daemon runs.
@@ -8,6 +11,7 @@
 use super::{Daemon, log};
 use crate::{agent, git::GitInfo, proto::*, util};
 use anyhow::{Result, bail};
+use iroh::EndpointId;
 use serde_json::Value;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -78,20 +82,23 @@ impl Daemon {
 
     async fn reason_sync(self: &Arc<Self>) -> Result<()> {
         let Some(bin) = agent::find_bin("reason") else { return Ok(()) };
-        let out = tokio::process::Command::new(bin)
-            .args(["session", "list", "--limit", "20", "--json"])
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output();
-        let out = tokio::time::timeout(Duration::from_secs(30), out).await??;
-        if !out.status.success() {
-            bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        let list: Value = serde_json::from_slice(&out.stdout)?;
-        let live: Vec<&Value> = list["items"]
-            .as_array()
-            .map(|a| a.iter().filter(|s| s["finished_at"].is_null() && s["is_archived"] != true).collect())
-            .unwrap_or_default();
+        // On your other computers nothing is listed, so any listed there leave (as below, when they end). A Reason CLI
+        // older than `--network` refuses the flag: then the error is logged and nothing is listed.
+        let list = if self.carries_reason_sessions() {
+            let out = tokio::process::Command::new(bin)
+                .args(["session", "list", "--network", "--limit", "20", "--json"])
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output();
+            let out = tokio::time::timeout(Duration::from_secs(30), out).await??;
+            if !out.status.success() {
+                bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            serde_json::from_slice(&out.stdout)?
+        } else {
+            Value::Null
+        };
+        let live = on_network(&list);
 
         let now = util::now_ms();
         let mut seen = HashSet::new();
@@ -103,13 +110,7 @@ impl Daemon {
             seen.insert(key.clone());
             if !self.inner.lock().unwrap().live.contains_key(&key) {
                 let git = GitInfo { root: None, repo: text("repo"), branch: text("branch") };
-                // Named for its repo, else for the first words of its title (kept once chosen).
-                let name = git
-                    .repo
-                    .is_none()
-                    .then(|| title.as_deref().map(first_words))
-                    .flatten()
-                    .map(|t| util::joined(&t, "reason"));
+                let name = Some(name(text("reason_name"), git.repo.as_deref(), title.as_deref()));
                 let reg = SessionReg {
                     key: key.clone(),
                     agent: "reason".into(),
@@ -156,6 +157,100 @@ impl Daemon {
     }
 }
 
-fn first_words(title: &str) -> String {
-    util::slug(&title.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+impl Daemon {
+    /// Whether this computer lists your Reason sessions: see [`carries`].
+    fn carries_reason_sessions(&self) -> bool {
+        let (Some(net), Some(team)) = (self.net(), self.team_state()) else { return true };
+        let mine = net
+            .remotes()
+            .into_iter()
+            .filter(|(id, r)| r.online && team.member(id).is_some_and(|m| m.active && m.person == self.person))
+            .map(|(id, _)| id);
+        carries(self.key.public(), mine)
+    }
+}
+
+/// Of your computers online now (`mine`, besides this one), the one whose key sorts first lists your Reason sessions,
+/// so each is on the network once however many computers you have. Every computer works this out alike from the
+/// roster and who it is connected to, with no word between them; when that one goes offline, the next takes over at
+/// its next listing. (A Reason session runs in Reason's cloud, on none of them: any one can carry it.)
+fn carries(me: EndpointId, mine: impl IntoIterator<Item = EndpointId>) -> bool {
+    mine.into_iter().all(|id| me <= id)
+}
+
+/// The live sessions the list puts on the network. The server marks each session `on_network` only when it is under a
+/// Reason you own whose owner put it on the network; a list without the mark (from a server older than the switch)
+/// puts nothing on it, rather than every session you can see, other people's shared Reasons among them.
+fn on_network(list: &Value) -> Vec<&Value> {
+    list["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|s| s["on_network"] == true && s["finished_at"].is_null() && s["is_archived"] != true)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Named for its Reason, else its repo, else the first words of its title (kept once chosen).
+fn name(reason: Option<String>, repo: Option<&str>, title: Option<&str>) -> String {
+    let base = reason
+        .or_else(|| repo.and_then(|r| r.rsplit('/').next()).map(str::to_string))
+        .or_else(|| title.map(|t| t.split_whitespace().take(3).collect::<Vec<_>>().join(" ")))
+        .unwrap_or_default();
+    util::joined(&base, "reason")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+    use serde_json::json;
+
+    #[test]
+    fn only_sessions_the_server_puts_on_the_network_are_listed() {
+        let list = json!({ "items": [
+            { "session_id": "mine", "on_network": true, "finished_at": null, "is_archived": false },
+            { "session_id": "off", "on_network": false, "finished_at": null },
+            // From an older server, which doesn't say: another person's shared Reason may be among these.
+            { "session_id": "unmarked", "finished_at": null },
+            { "session_id": "finished", "on_network": true, "finished_at": "2026-10-19T00:00:00Z" },
+            { "session_id": "archived", "on_network": true, "finished_at": null, "is_archived": true },
+            { "session_id": "truthy", "on_network": "true", "finished_at": null },
+        ]});
+        let ids: Vec<&str> = on_network(&list).iter().filter_map(|s| s["session_id"].as_str()).collect();
+        assert_eq!(ids, ["mine"]);
+        assert!(on_network(&Value::Null).is_empty());
+        assert!(on_network(&json!({ "error": "not signed in" })).is_empty());
+    }
+
+    #[test]
+    fn one_of_your_computers_carries_them() {
+        let mut keys: Vec<EndpointId> = (0..3).map(|_| SecretKey::generate().public()).collect();
+        keys.sort();
+        let (first, second, third) = (keys[0], keys[1], keys[2]);
+        // Alone, a computer carries them; with others online, only the one that sorts first does.
+        assert!(carries(second, []));
+        assert!(carries(first, [second, third]));
+        assert!(!carries(second, [first, third]));
+        assert!(!carries(third, [second, first]));
+        // The first goes offline: the next one takes over.
+        assert!(carries(second, [third]));
+        // Exactly one of them, whichever view each has of the same three.
+        let carriers = keys.iter().filter(|&&me| carries(me, keys.iter().copied().filter(|&k| k != me))).count();
+        assert_eq!(carriers, 1);
+    }
+
+    #[test]
+    fn named_for_the_reason_within_forty_characters() {
+        assert_eq!(name(Some("Billing triage".into()), Some("acme/api"), Some("Fix it")), "billing-triage-reason");
+        assert_eq!(name(None, Some("acme/api"), Some("Fix flaky billing test")), "api-reason");
+        assert_eq!(name(None, None, Some("Fix flaky billing test")), "fix-flaky-billing-reason");
+        assert_eq!(name(None, None, None), "reason");
+        let long = name(Some("Quarterly revenue reconciliation for every region".into()), None, None);
+        assert!(long.len() <= 40 && long.ends_with("-reason"), "{long}");
+        assert_eq!(long, "quarterly-revenue-reconciliation-reason");
+        let cjk = name(Some("請求書の自動処理とレポート作成のためのワークフロー".into()), None, None);
+        assert!(cjk.len() <= 40 && cjk.ends_with("-reason"), "{cjk}");
+    }
 }

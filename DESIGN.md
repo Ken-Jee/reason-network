@@ -166,7 +166,7 @@ The hard part. Each session advertises a **delivery tier** so senders know when 
 | Codex | push | `codex queue --thread <id>` / app-server `turn/start` (default daemon mode). Mid-turn: `PostToolUse` `additionalContext`. Stop: `decision:block`. Hooks need one-time approval in `/hooks`. |
 | opencode | push | Plugin (one file for 1.x and 2.x): `client.session.promptAsync` (1.x), `ctx.session.prompt` (2.x, where busy/idle come from `session.execution.*` events). |
 | pi | push | Extension (`~/.pi/agent/extensions/reason-network.ts`): registers the MCP server per session (`deferred`, with `REASON_NETWORK_SESSION`), `sendUserMessage` (`deliverAs: "steer"` mid-run, a new turn when idle), busy/idle from `agent_start`/`agent_settled`, the session name as `doing`. |
-| Reason | push | Its agent runs in Reason's cloud: the daemon lists live sessions (`reason session list --json`, when `reason = true`) and sends with `reason session send`. Replies go through the CLI: `reason-network send <to> --from <its address>`. |
+| Reason | push | Its agent runs in Reason's cloud: the daemon lists the live sessions on the network (`reason session list --network --json`, when `reason = true`: sessions of Reasons you own whose "On the network" switch is on; a list that doesn't mark them so lists nothing), on one of your computers only (of yours online, the one whose key sorts first), names each for its Reason, and sends with `reason session send`. Replies go through the CLI: `reason-network send <to> --from <its address>`. |
 | Amp | push | Plugin: `thread.appendUserMessage(…, {steer:true})`. |
 | Cursor | turn | `postToolUse` `additional_context`; `stop` `followup_message`. Idle: background `reason-network wait`. |
 | Gemini CLI | turn | `AfterTool` `additionalContext`; `AfterAgent` block. Idle: experimental background-shell inject. |
@@ -317,7 +317,7 @@ edits): Claude Code plugin or `claude mcp add --scope user` + hooks, `~/.codex/c
 | `tray` | `true` | macOS: show the menu bar icon while the background service runs |
 | `lan` | `true` | find teammates on the local network (mDNS) |
 | `auto_update` | `true` | install new releases when they come out (checked every few hours) |
-| `reason` | `false` | list your live Reason sessions (set by `reason-network setup`) |
+| `reason` | `false` | list your live Reason sessions that are on the network (set by `reason-network setup`) |
 | `inbound` | accept | see above |
 
 ## Troubleshooting
