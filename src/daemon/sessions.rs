@@ -279,8 +279,12 @@ impl Daemon {
                 let _ = g.store.touch_session(&l.name, now);
             }
         }
-        let live: HashSet<&str> = g.live.values().map(|l| l.name.as_str()).collect();
-        let _ = g.store.forget_sessions(now - FORGET_MS, &live, &self.person);
+        // Just after a start, sessions that are still up haven't registered again: none is forgotten until each has had
+        // the time a hook-only session gets to show it is there.
+        if self.started.elapsed().as_millis() > HOOK_TTL_MS as u128 {
+            let live: HashSet<&str> = g.live.values().map(|l| l.name.as_str()).collect();
+            let _ = g.store.forget_sessions(now - FORGET_MS, &live, &self.person);
+        }
     }
 }
 

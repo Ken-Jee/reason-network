@@ -128,7 +128,8 @@ machine on ALPN `tincan/1`, length-prefixed JSON frames. The receiver persists, 
 `stored | delivered | held | refused`; later receipts (`delivered`, `read`) flow back. The sender keeps an
 outbox and retries when the target machine comes back. Mail for an offline session waits in the target
 machine's mailbox under the session name, for a day: a session gone longer is forgotten, with the mail it never
-read.
+read (not the person's own `listen` mailboxes, such as `terminal`, nor mail held for them; and nothing in the
+hours after the daemon starts, while live sessions register again).
 
 Later (M4): an **anchor** is just a member daemon on an always-on box (VPS, Pi) with `role=anchor` that
 also holds mail for offline machines and keeps searchable team history. Same binary, no special server.

@@ -1,5 +1,5 @@
-//! SQLite: messages, and every session name ever used on this machine (so a new session can inherit a
-//! stale name and its unread mail).
+//! SQLite: messages, and the sessions this machine has seen: live ones, ones gone for less than a day, and the
+//! person's own mailboxes (`cli`, such as `terminal`).
 
 use crate::proto::{Message, Tier};
 use anyhow::Result;
@@ -226,14 +226,15 @@ impl Store {
         Ok(())
     }
 
-    /// Forgets the sessions not seen since `before`, other than `live` ones, and deletes the mail they never read, so a
-    /// session that takes the name later doesn't get it.
+    /// Forgets the sessions not seen since `before`, other than `live` ones and the person's own mailboxes (`cli`), and
+    /// deletes the mail they never read, so a session that takes the name later doesn't get it (mail held for the
+    /// person stays theirs to settle).
     pub fn forget_sessions(&self, before: i64, live: &HashSet<&str>, person: &str) -> Result<()> {
-        let mut st = self.db.prepare_cached("SELECT name FROM sessions WHERE last_seen < ?1")?;
+        let mut st = self.db.prepare_cached("SELECT name FROM sessions WHERE last_seen < ?1 AND agent != 'cli'")?;
         let gone: Vec<String> = st.query_map([before], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         for name in gone.iter().filter(|n| !live.contains(n.as_str())) {
             self.db.execute(
-                "DELETE FROM messages WHERE recipient = ?1 AND read_at IS NULL",
+                "DELETE FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0",
                 [format!("{person}/{name}")],
             )?;
             self.db.execute("DELETE FROM sessions WHERE name = ?1", [name])?;
@@ -295,12 +296,13 @@ mod tests {
 
     #[test]
     fn a_session_gone_a_day_is_forgotten_with_the_mail_it_never_read() {
+        // (Not one that is live, nor the person's own mailbox, nor mail held for the person.)
         let store = Store::open(Path::new(":memory:")).unwrap();
         let day = 86_400_000;
-        let session = |name: &str, last_seen: i64| Remembered {
+        let session = |name: &str, agent: &str, last_seen: i64| Remembered {
             name: name.into(),
             key: name.into(),
-            agent: "claude-code".into(),
+            agent: agent.into(),
             cwd: "~".into(),
             repo: None,
             branch: None,
@@ -308,7 +310,12 @@ mod tests {
             tier: Tier::Push,
             last_seen,
         };
-        for s in [session("gone", 0), session("recent", 2 * day), session("still-up", 0)] {
+        for s in [
+            session("gone", "claude-code", 0),
+            session("recent", "claude-code", 2 * day),
+            session("still-up", "claude-code", 0),
+            session("terminal", "cli", 0),
+        ] {
             store.upsert_session(&s).unwrap();
         }
         let to = |id: &str, name: &str| Message {
@@ -327,10 +334,14 @@ mod tests {
         };
         store.insert(&to("1", "gone"), false).unwrap();
         store.insert(&to("2", "recent"), false).unwrap();
+        store.insert(&to("3", "terminal"), false).unwrap();
+        store.insert(&to("4", "gone"), true).unwrap();
         store.forget_sessions(day + 1, &HashSet::from(["still-up"]), "lars").unwrap();
         let names: Vec<String> = store.sessions().unwrap().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, ["recent", "still-up"]);
+        assert_eq!(names, ["recent", "still-up", "terminal"]);
         assert_eq!(store.unread_count("lars/gone").unwrap(), 0);
         assert_eq!(store.unread_count("lars/recent").unwrap(), 1);
+        assert_eq!(store.unread_count("lars/terminal").unwrap(), 1);
+        assert_eq!(store.held().unwrap().len(), 1);
     }
 }
