@@ -113,6 +113,8 @@ pub struct Daemon {
     shown: Mutex<HashMap<String, Instant>>,
     /// Each session's `ask_user` question that is up, with its answer once there is one.
     asks: Mutex<HashMap<String, ask::Asking>>,
+    /// When this daemon started: sessions live before it register again in the while after.
+    started: Instant,
 }
 
 struct Inner {
@@ -193,6 +195,7 @@ impl Daemon {
             rate: Mutex::new(HashMap::new()),
             shown: Mutex::new(HashMap::new()),
             asks: Mutex::new(HashMap::new()),
+            started: Instant::now(),
         })
     }
 

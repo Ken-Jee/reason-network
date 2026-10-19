@@ -41,7 +41,7 @@ pub struct ListArgs {
     /// Only sessions matching this text (person, session, agent, repo, branch, directory or what it's doing).
     #[serde(default)]
     pub filter: Option<String>,
-    /// Also list sessions that are offline.
+    /// Also list sessions that went offline in the last day.
     #[serde(default)]
     pub all: Option<bool>,
 }

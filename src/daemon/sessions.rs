@@ -8,6 +8,8 @@ use std::{collections::HashSet, sync::Arc, time::Instant};
 
 /// A hook-only session that hasn't fired a hook for this long is considered gone.
 const HOOK_TTL_MS: i64 = 6 * 3_600_000;
+/// A session gone this long isn't coming back: it is forgotten, with the mail it never read.
+const FORGET_MS: i64 = 24 * 3_600_000;
 
 impl Daemon {
     /// How fast hooks let us reach an agent's session (`push_failed`: its push channel didn't work).
@@ -276,6 +278,12 @@ impl Daemon {
             if let Some(l) = g.live.remove(&key) {
                 let _ = g.store.touch_session(&l.name, now);
             }
+        }
+        // Just after a start, sessions that are still up haven't registered again: none is forgotten until each has had
+        // the time a hook-only session gets to show it is there.
+        if self.started.elapsed().as_millis() > HOOK_TTL_MS as u128 {
+            let live: HashSet<&str> = g.live.values().map(|l| l.name.as_str()).collect();
+            let _ = g.store.forget_sessions(now - FORGET_MS, &live, &self.person);
         }
     }
 }
