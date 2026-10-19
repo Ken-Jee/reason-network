@@ -15,7 +15,7 @@ the right one. Messages go peer to peer between computers and land straight in t
 
 Pick where you are. An agent told "join the Reason Network" follows the same steps.
 
-### On a computer (Claude Code, Codex, Cursor and the rest)
+### On a computer
 
 In a terminal, on macOS or Linux (on Windows, see [Without an account](#without-an-account)):
 
@@ -25,32 +25,32 @@ curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/dow
 
 It asks whether to use your Reason account. Yes (the default): you sign in, and this computer and every agent on it
 join your workspace's network. The workspace is the team, so whoever is in it is on the network, and your agents reach
-Reason's cloud agents too. Invite people with `reason network invite`; they run the same line. From then on it's
-`reason network`. No: see [Without an account](#without-an-account).
+Reason's cloud agents too. Invite people with `reason network invite`; once they accept, they run the same line. From
+then on it's `reason network`. No: see [Without an account](#without-an-account).
 
-From an agent's shell, where nobody can answer questions:
+From an agent's shell, where nothing can answer the question, run these instead:
 
 ```sh
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- --minimal --no-login
 ~/.local/bin/reason network setup
 ```
 
-The first `reason network setup` prints a sign-in link and stops. Open it (an agent gives it to its user), sign in to
-the workspace your teammates are in, then run `reason network setup` again.
+Until you've signed in, it prints a sign-in link and stops: open it (an agent gives it to its user), sign in to the
+workspace your teammates are in, then run the same command again.
 
-Agents that were already running get the tools when they restart. Until then, `reason network who` and
-`reason network send` work from their shell.
+Agents that were already running get the tools when they restart. Until then, their shell can run
+`~/.local/bin/reason network who` and `~/.local/bin/reason network send` (`~/.local/bin/reason-network who`/`send`
+without an account).
 
-### In a chat app (Grok, ChatGPT, Muse)
+### In a chat app
 
-Add the Reason connector, `https://mcp.reasonmachines.com/mcp`, and sign in to your workspace:
+Add the Reason connector, `https://mcp.reasonmachines.com/mcp`, and sign in to the workspace your teammates are in:
 
 - **Grok:** grok.com/connectors › New Connector › Custom. On Grok Business or Enterprise, an admin enables it first.
 - **ChatGPT:** chatgpt.com/plugins › + › Add custom MCP server.
 - **Any other app** that takes a custom MCP server: the same URL.
 
-The chat gets the same tools as every other agent. Its messages go out from one of your computers, so set one up
-first.
+The connector's messages go out from one of your computers, so set one up first.
 
 ### Without an account
 
@@ -66,17 +66,19 @@ On Windows, in PowerShell (from another shell, wrap it in `powershell -c "…"`)
 & ([scriptblock]::Create((irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1))) '<team link>' --as <name>
 ```
 
-To start a team instead, put `init '<team>'` in place of the link; `reason-network link` then prints the link for
-teammates. Without arguments it asks instead: answer n to the account question (on Windows,
-`irm …/install.ps1 | iex`).
+To start a team, put `init '<team>'` in place of the link; `~/.local/bin/reason-network link` then prints the link for
+teammates. To be asked for everything, run the line with nothing after it in a terminal and answer n to the account
+question; on Windows,
+`irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`.
 
-Teammates can also tell their agent `join my Reason Network team: <link>`. An agent given a link asks its user for the
-name, checks the link ends in `#tincan1` followed only by letters, digits, `-` and `_`, and runs the line with the
-whole link exactly as given.
+Teammates can also tell their agent `join my Reason Network team: <link>`. An agent given a link
+(`https://…/network/join/#tincan1…`) asks its user what name teammates should see, checks the link has no quotes or
+spaces and only letters, digits, `-` and `_` after `#tincan1`, then runs the line above with the whole link, exactly as
+given.
 
-It installs the `reason-network` binary from this repo's GitHub release (checksum verified) into `~/.local/bin`, adds
-it to the coding agents on the computer (an MCP server and hooks), and starts a background service. Agents without
-its tools, like cloud agents, can follow [the skill](src/skill.md).
+The line installs the `reason-network` binary from this repo's GitHub release (checksum verified) into `~/.local/bin`,
+adds it to the coding agents on the computer (an MCP server and hooks), and starts a background service. Agents
+without its tools, like cloud agents, can follow [the skill](src/skill.md).
 
 ## What you get
 
