@@ -37,8 +37,8 @@ curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<lin
 
 That's it. Ask any agent "who's on the team?", tell it to ask someone's agent something, or to send them a file.
 
-**Without an account**: install just this engine. It asks your name and a team name, and gives you a team link (on
-your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their agent
+**Without an account**: install just this engine (answer n when it asks to use your Reason account). It asks your
+name and a team name, and gives you a team link (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their agent
 "join my Reason Network team: <link>". Names aren't verified this way.
 
 ```sh

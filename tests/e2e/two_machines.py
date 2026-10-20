@@ -7,7 +7,7 @@ test messages into that real session (they say "ignore this").
 """
 import base64, json, os, re, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from proofs import TRUST, proof
+from proofs import TRUST, keygen, proof
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.path.join(ROOT, "target", "debug", "reason-network")
@@ -174,7 +174,7 @@ out, both = run(mal, "join", link.group(1), "--proof", proof("u_mallory", "alex"
 check("a name verified by another account is taken: name_taken", as_json(out) == {"error": "name_taken"}, both)
 out, both = run(mal, "join", link.group(1), "--as", "alice", "--no-setup", "--json")
 check("…and without a proof too", as_json(out) == {"error": "name_taken"}, both)
-_, out = run(mal, "join", link.group(1), "--proof", proof("u_mallory", "mallory", mal_ep, key=os.urandom(32)), "--no-setup")
+_, out = run(mal, "join", link.group(1), "--proof", proof("u_mallory", "mallory", mal_ep, key=keygen()), "--no-setup")
 check("a forged proof is refused", "signature doesn't verify" in out and "Joined" not in out, out)
 _, out = run(mal, "join", link.group(1), "--proof", proof("u_alex", "alex", ep["alex"]), "--no-setup")
 check("someone else's proof is refused", "for another machine" in out and "Joined" not in out, out)

@@ -1,83 +1,72 @@
 """Reason sign-in proofs for the e2e tests: a stand-in for Reason's signing key, trusted through
-REASON_NETWORK_TRUST_KEYS. Ed25519 from RFC 8032's reference code, so the tests need nothing installed."""
-import base64, hashlib, json, os, time
+REASON_NETWORK_TRUST_KEYS (debug builds). RS256 (RSASSA-PKCS1-v1_5 with SHA-256) in plain Python, so the tests need
+nothing installed: keys are made fresh for each run."""
+import base64, hashlib, json, secrets, time
 
-p = 2**255 - 19
-d = -121665 * pow(121666, p - 2, p) % p
-q = 2**252 + 27742317777372353535851937790883648493
-
-
-def _add(P, Q):
-    A, B = (P[1] - P[0]) * (Q[1] - Q[0]) % p, (P[1] + P[0]) * (Q[1] + Q[0]) % p
-    C, D = 2 * P[3] * Q[3] * d % p, 2 * P[2] * Q[2] % p
-    E, F, G, H = B - A, D - C, D + C, B + A
-    return (E * F, G * H, F * G, E * H)
+# DER of the DigestInfo for SHA-256, which PKCS#1 v1.5 puts before the hash (RFC 8017, 9.2).
+SHA256_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
 
 
-def _mul(s, P):
-    Q = (0, 1, 1, 0)
-    while s > 0:
-        if s & 1:
-            Q = _add(Q, P)
-        P, s = _add(P, P), s >> 1
-    return Q
+def _prime(bits):
+    while True:
+        n = secrets.randbits(bits) | (1 << (bits - 1)) | (1 << (bits - 2)) | 1
+        if all(n % p for p in (3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)) and _probably_prime(n):
+            return n
 
 
-def _compress(P):
-    zinv = pow(P[2], p - 2, p)
-    x, y = P[0] * zinv % p, P[1] * zinv % p
-    return int.to_bytes(y | ((x & 1) << 255), 32, "little")
+def _probably_prime(n, rounds=40):
+    d, r = n - 1, 0
+    while d % 2 == 0:
+        d, r = d // 2, r + 1
+    for _ in range(rounds):
+        x = pow(secrets.randbelow(n - 3) + 2, d, n)
+        if x in (1, n - 1):
+            continue
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
 
 
-def _base():
-    y = 4 * pow(5, p - 2, p) % p
-    x2 = (y * y - 1) * pow(d * y * y + 1, p - 2, p)
-    x = pow(x2, (p + 3) // 8, p)
-    if (x * x - x2) % p:
-        x = x * pow(2, (p - 1) // 4, p) % p
-    if x & 1:
-        x = p - x
-    return (x, y, 1, x * y % p)
+def keygen(bits=2048):
+    """An RSA key: (n, e, d)."""
+    e = 65537
+    while True:
+        p, q = _prime(bits // 2), _prime(bits // 2)
+        phi = (p - 1) * (q - 1)
+        if p != q and phi % e and (p * q).bit_length() == bits:
+            return p * q, e, pow(e, -1, phi)
 
 
-G = _base()
-
-
-def _expand(seed):
-    h = hashlib.sha512(seed).digest()
-    a = int.from_bytes(h[:32], "little")
-    a &= (1 << 254) - 8
-    a |= 1 << 254
-    return a, h[32:]
-
-
-def public(seed):
-    return _compress(_mul(_expand(seed)[0], G))
-
-
-def sign(seed, msg):
-    a, prefix = _expand(seed)
-    A = _compress(_mul(a, G))
-    r = int.from_bytes(hashlib.sha512(prefix + msg).digest(), "little") % q
-    R = _compress(_mul(r, G))
-    h = int.from_bytes(hashlib.sha512(R + A + msg).digest(), "little") % q
-    return R + int.to_bytes((r + h * a) % q, 32, "little")
+def sign(key, msg):
+    n, _, d = key
+    k = (n.bit_length() + 7) // 8
+    t = SHA256_INFO + hashlib.sha256(msg).digest()
+    em = b"\x00\x01" + b"\xff" * (k - len(t) - 3) + b"\x00" + t
+    return pow(int.from_bytes(em, "big"), d, n).to_bytes(k, "big")
 
 
 def b64(b):
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
-REASON = os.urandom(32)  # stands in for Reason's signing key
+def _int(i):
+    return b64(i.to_bytes((i.bit_length() + 7) // 8, "big"))
+
+
+REASON = keygen()  # stands in for Reason's signing key
 KID = "e2e-1"
-TRUST = json.dumps({"keys": [{"kty": "OKP", "crv": "Ed25519", "kid": KID, "x": b64(public(REASON))}]})
+TRUST = json.dumps({"keys": [{"kty": "RSA", "kid": KID, "alg": "RS256", "use": "sig", "n": _int(REASON[0]), "e": _int(REASON[1])}]})
 
 
 def proof(sub, name, endpoint, key=None, **claims):
-    """A proof that `endpoint` belongs to account `sub`, called `name`; signed with `key` it's a forgery."""
+    """A proof that `endpoint` belongs to account `sub`, called `name`; signed with another `key` it's a forgery."""
     now = int(time.time())
-    body = {"iss": "https://reasonmachines.com", "aud": "reason-network", "sub": sub, "name": name,
+    body = {"iss": "https://reasonmachines.com/network", "aud": "reason-network", "sub": sub, "name": name,
             "email": f"{name}@example.com", "endpoint": endpoint, "iat": now, "exp": now + 90 * 86400, **claims}
-    head = {"alg": "EdDSA", "kid": KID, "typ": "reason-network-proof"}
+    head = {"alg": "RS256", "kid": KID, "typ": "reason-network-proof"}
     signing = f"{b64(json.dumps(head).encode())}.{b64(json.dumps(body).encode())}"
     return f"{signing}.{b64(sign(key or REASON, signing.encode()))}"

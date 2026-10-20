@@ -1029,8 +1029,8 @@ mod tests {
         // A proof for another machine, or a forged one, is refused.
         assert!(!s.attest(&b.public(), &proof("u_alice", "alice", &a)));
         let forged = crate::proof::tests::sign_with(
-            &key(),
-            serde_json::json!({"alg": "EdDSA", "kid": crate::proof::tests::KID, "typ": "reason-network-proof"}),
+            crate::proof::tests::forger(),
+            crate::proof::tests::header(),
             crate::proof::tests::claims("u_alice", "alice", &b.public()),
         );
         assert!(!s.attest(&b.public(), &forged));
@@ -1105,11 +1105,7 @@ mod tests {
     fn proof_for(sub: &str, name: &str, k: &SecretKey, ttl: i64) -> String {
         let mut c = crate::proof::tests::claims(sub, name, &k.public());
         c["exp"] = serde_json::json!(util::now_ms() / 1000 + ttl);
-        crate::proof::tests::sign_with(
-            &crate::proof::tests::signer(),
-            serde_json::json!({"alg": "EdDSA", "kid": crate::proof::tests::KID, "typ": "reason-network-proof"}),
-            c,
-        )
+        crate::proof::tests::sign_with(crate::proof::tests::signer(), crate::proof::tests::header(), c)
     }
 
     #[test]

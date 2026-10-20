@@ -127,13 +127,15 @@ the code's key knows the code, so could make up a team), so a sign-in never join
 names the team. Links are `rn1-…` (older builds wrote `tincan1…`, with the same payload; both are read). After `init`
 and `join` the CLI prints the invite line, `Join the Reason Network: <team link>`, and agents get it from `list_team`.
 
-**Sign-in proofs.** Signed in with Reason, a machine carries a proof: a compact JWS (Ed25519) from Reason saying
-this endpoint id belongs to account `sub`, named `name`, issued `iat`, until `exp` (`init`/`join --proof`,
-`reason-network proof` to refresh). The engine checks it against Reason's public keys, compiled in, and never calls
-Reason; debug builds also trust the keys in `REASON_NETWORK_TRUST_KEYS`, for tests, and release builds don't. A proof
-longer than 4 KB, or issued more than a day ahead, is refused. Proofs travel in the team state's `attestations`
-(endpoint → JWS), outside the signed entries, so builds without them pass the rest on unchanged; each machine checks
-every proof itself, drops the ones that don't verify, and keeps them only for members.
+**Sign-in proofs.** Signed in with Reason, a machine carries a proof: a compact JWS from Reason's cloud-access
+issuer (`iss` `https://reasonmachines.com/network`), RS256 only, saying this endpoint id belongs to account `sub`,
+named `name`, issued `iat`, until `exp` (`init`/`join --proof`, `reason-network proof` to refresh). The engine checks
+it against Reason's RSA public keys (2048 bits or more), compiled in and never removed, and never calls Reason; debug
+builds also trust the keys in `REASON_NETWORK_TRUST_KEYS` (an RSA JWKS), for tests, and release builds don't. A proof
+longer than 4 KB (one signed with a 4096-bit key is at most about 1.6 KB), or issued more than a day ahead, is refused. Proofs
+travel in the team state's `attestations` (endpoint → JWS), outside the signed entries, so builds without them pass
+the rest on unchanged; each machine checks every proof itself, drops the ones that don't verify, and keeps them only
+for members.
 
 `verified` is per person: a person shows as verified while a machine of theirs has a proof for their name that hasn't
 expired. `has_proof` is per machine. Expiry decides only that mark, never membership: who may hold a name goes by
