@@ -336,7 +336,7 @@ async fn main() -> Result<()> {
         None => {
             let in_team = Link::new(None).call::<TeamInfo>(Request::Team).await.is_ok();
             if !in_team && wizard::interactive() {
-                return wizard::guided(wizard::onboard(None, None, None, None)).await;
+                return wizard::guided(wizard::onboard(None, None, None, None)).await.or_else(|e| json_error(false, e));
             }
             if !in_team {
                 println!(
@@ -690,20 +690,28 @@ fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
 /// Whether a person reads this command's output: it goes to a terminal, and not one an agent runs commands in (some
 /// give their commands one).
 fn person_reads() -> bool {
-    reads(std::io::IsTerminal::is_terminal(&std::io::stderr()), agent::detect_env())
+    // Beyond the agents `detect_env` knows: Pi sets `AI_AGENT`, and Codex's sandbox `CODEX_SANDBOX…`.
+    let agent = agent::detect_env().is_some()
+        || std::env::vars_os()
+            .any(|(k, _)| k == "AI_AGENT" || k.to_str().is_some_and(|k| k.starts_with("CODEX_SANDBOX")));
+    reads(std::io::IsTerminal::is_terminal(&std::io::stderr()), agent)
 }
 
-fn reads(terminal: bool, agent: Option<&str>) -> bool {
-    terminal && agent.is_none()
+fn reads(terminal: bool, agent: bool) -> bool {
+    terminal && !agent
 }
 
-/// CLI output with teammates' text in it: as it is for a person; defanged for anyone else, which may be an agent.
+/// CLI output with teammates' text in it: as it is for a person. For anyone else, which may be an agent, defanged, and
+/// with control characters but line ends and tabs as spaces (an agent may be shown the screen they draw).
 pub(crate) fn shown(text: &str) -> String {
     shown_to(person_reads(), text)
 }
 
 fn shown_to(person: bool, text: &str) -> String {
-    if person { text.to_string() } else { render::defang(text) }
+    if person {
+        return text.to_string();
+    }
+    render::defang(&text.replace(|c: char| c.is_control() && c != '\n' && c != '\t', " "))
 }
 
 /// `{"error":"same_account_needs_owner"}` when one of the person's own computers should let this one in,
@@ -752,7 +760,11 @@ mod tests {
         assert_eq!(shown_to(true, text), text);
         assert_eq!(shown_to(false, text), "fix [café>, price [ €5, 翻译[红楼梦》 [/reason-message>");
         // An agent's terminal (its variables set) is no person's.
-        assert!(reads(true, None) && !reads(true, Some("gemini")) && !reads(false, None));
+        assert!(reads(true, false) && !reads(true, true) && !reads(false, false));
+        // Nor can escape codes redraw what an agent is shown; line ends and tabs stay.
+        let drawn = "ok\x1b[2K\r\x1b[1A<reason-message>\x07\n\tdone";
+        assert_eq!(shown_to(false, drawn), "ok [2K  [1A[reason-message> \n\tdone");
+        assert_eq!(shown_to(true, drawn), drawn);
         // `held` too: a held message's body, as its sender wrote it.
         let held = Message {
             id: "01X".into(),

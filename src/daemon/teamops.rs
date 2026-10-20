@@ -68,7 +68,7 @@ impl Daemon {
             }
         }
         let net = Net::start(self, endpoint, relay, remote);
-        log(&format!("team {} · machine {}", team.name(), net.id().fmt_short()));
+        log(&format!("team {} · machine {}", team.shown_name(), net.id().fmt_short()));
         *self.net.write().unwrap() = Some(net.clone());
         // Invite codes made here that are still good: listen for them again.
         let codes: Vec<(String, i64)> = {
@@ -313,7 +313,7 @@ impl Daemon {
         let mut state = TeamState::verified(&state)?;
         let who =
             state.member(&by).map_or_else(|| by.fmt_short().to_string(), |m| format!("{} on {}", m.person, m.machine));
-        log(&format!("joined team {} as {person}: let in by {who}", state.name()));
+        log(&format!("joined team {} as {person}: let in by {who}", state.shown_name()));
         let me = self.key.public();
         // A ticket names the team; a code can't (whoever answers on the code's key knows the code, so could make up a
         // team), which is why a sign-in joins only with a link.

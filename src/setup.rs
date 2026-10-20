@@ -1462,7 +1462,7 @@ pub async fn doctor() -> Result<()> {
             println!("✓ daemon running");
             println!("- not in a team yet: run `{CLI}`");
         }
-        Err(e) => println!("✗ daemon: {e:#}"),
+        Err(e) => println!("✗ daemon: {}", crate::shown(&format!("{e:#}"))),
     }
     let svc = service_installed();
     println!(

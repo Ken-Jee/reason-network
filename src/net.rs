@@ -251,7 +251,8 @@ pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest
         match reply {
             Ok(Ok(JoinReply::Ok { state })) => return Joined { result: Ok((*state, addr.id)), unreachable },
             Ok(Ok(JoinReply::Err { error })) => {
-                if let Err(e) = refused.add(req, error) {
+                // The other machine's words, for a terminal: no escape codes or line breaks.
+                if let Err(e) = refused.add(req, error.replace(char::is_control, " ")) {
                     return Joined { result: Err(e), unreachable };
                 }
             }

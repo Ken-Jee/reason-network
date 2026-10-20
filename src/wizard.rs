@@ -59,7 +59,7 @@ pub async fn onboard(
     intro(format!(" {CLI} "))?;
     let link = Link::new(None);
     if let Ok(t) = link.call::<TeamInfo>(Request::Team).await {
-        log::info(format!("You're in team {} as {} on {}.", t.name, t.person, t.machine))?;
+        log::info(crate::shown(&format!("You're in team {} as {} on {}.", t.name, t.person, t.machine)))?;
         outro(format!("`{CLI}` shows who's around; `{CLI} invite` gives you the team link."))?;
         return Ok(());
     }
@@ -86,9 +86,9 @@ pub async fn onboard(
         let t: TeamInfo = link
             .call(Request::CreateTeam { name, person, relay: None, proof: None })
             .await
-            .inspect_err(|e| sp.error(format!("{e:#}")))?;
+            .inspect_err(|e| sp.error(crate::shown(&format!("{e:#}"))))?;
         crate::wait_exit(crate::daemon_pid()).await;
-        sp.stop(format!("Created team {}. You are {} on {}.", t.name, t.person, t.machine));
+        sp.stop(crate::shown(&format!("Created team {}. You are {} on {}.", t.name, t.person, t.machine)));
     } else {
         let mut invite = invite;
         loop {
@@ -107,12 +107,12 @@ pub async fn onboard(
             {
                 Ok(t) => {
                     crate::wait_exit(crate::daemon_pid()).await;
-                    sp.stop(format!("Joined team {} as {} on {}.", t.name, t.person, t.machine));
+                    sp.stop(crate::shown(&format!("Joined team {} as {} on {}.", t.name, t.person, t.machine)));
                     break;
                 }
                 Err(e) if e.to_string().starts_with("already in team") => {
                     let why = e.to_string();
-                    sp.error(format!("You're {}.", why.split(". To switch").next().unwrap_or(&why)));
+                    sp.error(crate::shown(&format!("You're {}.", why.split(". To switch").next().unwrap_or(&why))));
                     if !confirm("Leave it and join this team instead?").initial_value(false).interact()? {
                         return Err(anyhow!("not joined; you're still in your old team"));
                     }
@@ -128,7 +128,7 @@ pub async fn onboard(
                     invite = Some(text);
                 }
                 Err(e) => {
-                    sp.error(format!("{e:#}"));
+                    sp.error(crate::shown(&format!("{e:#}")));
                     if !confirm("Try again?").initial_value(true).interact()? {
                         return Err(anyhow!("not joined"));
                     }
@@ -148,7 +148,7 @@ pub async fn onboard(
         println!("\n{url}\n");
     } else {
         if let Ok(t) = Link::new(None).call::<TeamInfo>(Request::Team).await {
-            note("Your team", render::team(&t).trim_end())?;
+            note("Your team", crate::shown(render::team(&t).trim_end()))?;
         }
         outro("You're in. Ask any of your agents: \"who's on the team?\"")?;
     }
@@ -244,11 +244,9 @@ pub async fn agents_and_preferences() -> Result<()> {
 pub async fn show_link(new: bool) -> Result<String> {
     let l: LinkInfo = Link::new(None).call(Request::Link { new }).await?;
     let copied = copy(&l.url);
-    let title = if copied {
-        format!("Team link for {} (on your clipboard)", l.team)
-    } else {
-        format!("Team link for {}", l.team)
-    };
+    let team = crate::shown(&l.team);
+    let title =
+        if copied { format!("Team link for {team} (on your clipboard)") } else { format!("Team link for {team}") };
     note(
         title,
         format!(
