@@ -132,16 +132,24 @@ read (not the person's own `listen` mailboxes, such as `terminal`, nor mail held
 hours after the daemon starts, while live sessions register again).
 
 **Files.** A message can carry small text files (`files: [{name, content}]`, at most 10, 256 KB each, 512 KB in all;
-valid UTF-8 without NUL bytes), inside the same envelope, so they are as authenticated as its text. The sender's
-client reads them from paths on its computer; both daemons hold them to the limits and reduce each name to a plain
-file name (no separators or `..`, no leading dot or dash, nothing invisible or reserved, at most 100 characters,
-distinct within the message, defanged like message text). The receiver saves them in
-`<state home>/inbox/<message id>/` (folder 0700, files 0600, never executable, never opened) and the message lists
-their paths. A held message's files are saved only once it is approved; a refused one's never are. They go with
-their message: when it is forgotten, or a day after it was read. A machine's presence lists `features: ["files"]`
-when its engine takes them; an older engine would drop the field without a word, so for a machine that doesn't say
-so, the files are written out in the text as fenced blocks when that fits the 64 KB body limit, and the message is
-refused for that recipient otherwise.
+UTF-8 with no control characters but tab and line ends), inside the same envelope, so they are as authenticated as its
+text. The sender's client reads them from paths on its computer: a person's `send --file` from anywhere, an agent's
+`send_message` only from its own folder (its repository, or where it works; links resolved), none of that folder's
+hidden files or folders, and nothing under `~/.config`, `~/.ssh`, `~/.aws` or the state home, so a prompt-injected agent
+can't mail out what its harness wouldn't let it read. Both daemons hold them to the limits and reduce each name to a
+plain file name (no separators or `..`, no leading dot or dash, nothing invisible, no Windows device names such as
+`CON`, `COM¹` or `CONIN$`, at most 100 characters and 200 bytes, distinct within the message, defanged like message
+text). A peer's message id must be a ULID as written. The receiver saves the files in a new folder of its own,
+`<state home>/inbox/<local id>/` (named by an id made there, never the sender's: folder 0700, files 0600, never
+executable, never opened, marked as downloaded with macOS's quarantine or Windows' internet zone; a name the file system
+folds into one already there gets `-2`), and lists their paths after the message's frame, where its text can't imitate
+them. A held message's files are saved only once it is approved (one that can't be saved stays held); a refused one's
+never are. They go with their message: when it is forgotten, a day after it was read, or a week after they came while it
+is unread; a message held a week with files goes. A machine keeps at most 100 MB of teammates' files (saved and held)
+and takes at most 20 MB an hour from one person; past either, the sender's machine is told to retry later and keeps the
+message in its outbox. A machine's presence lists `features: ["files"]` when its engine takes them; an older engine
+would drop the field without a word, so for a machine that doesn't say so, the files are written out in the text as
+fenced blocks when that fits the 64 KB body limit, and the message is refused for that recipient otherwise.
 
 Later (M4): an **anchor** is just a member daemon on an always-on box (VPS, Pi) with `role=anchor` that
 also holds mail for offline machines and keeps searchable team history. Same binary, no special server.
@@ -198,8 +206,8 @@ Three tools, none of which an agent has to call unless it wants to message someo
 
 - `list_team(filter?, all?)`: the directory, grouped by person then machine. One line per session: name,
   agent, status and for how long, repo@branch, `doing`, tier. Marks `← you`.
-- `send_message(to, message, reply_to?, notify?, files?)`: `files` are paths of small text files to carry (see
-  Files above). Returns per-recipient state (`delivered` / `queued` /
+- `send_message(to, message, reply_to?, notify?, files?)`: `files` are paths of small text files in the session's own
+  folder to carry (see Files above). Returns per-recipient state (`delivered` / `queued` /
   `held`) and tier, e.g. "queued: alice/web-cursor is idle and turn-only, it sees this when alice next
   prompts it". (`reason-network send --fyi` doesn't wake: read at the next natural pause.) `notify` also pops it up on
   the person's screen, for an approval or decision only they can make: osascript on macOS, notify-send on Linux,

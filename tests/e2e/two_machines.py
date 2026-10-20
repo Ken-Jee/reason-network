@@ -217,6 +217,9 @@ def write(name, data):
 def inbox(who):
     p = os.path.join(H[who], "inbox")
     return sorted(os.listdir(p)) if os.path.isdir(p) else []
+def message_with(out, text):
+    """The part of an inbox listing for the message saying `text`: its frame and the file list after it."""
+    return next((part for part in out.split("<reason-message") if text in part.split("</reason-message>")[0]), "")
 def saved(out, who):
     """The file paths a message lists, if each is in `who`'s inbox folder, readable and not executable."""
     paths = re.findall(r"^- (/.+)$", out, re.M)
@@ -230,7 +233,10 @@ check("a send with files is accepted", "→ alice/work-codex" in out and "refuse
 out = codex.tool("check_inbox", {}, meta)
 paths = saved(out, "alice")
 check("files arrive in the message, listed by where they are saved",
-      "Files they sent (text, saved on this computer" in out and [os.path.basename(p) for p in paths] == ["notes.md", "app.json"], out)
+      "Files they sent with" in out.split("</reason-message>")[-1] and [os.path.basename(p) for p in paths] == ["notes.md", "app.json"], out)
+check("…in folders named by the recipient, not by the sender's message id",
+      all(re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", os.path.basename(os.path.dirname(p))) for p in paths)
+      and re.search(r'id="([0-9A-Z]{26})"', out).group(1) not in inbox("alice"), out)
 check("…with the same text, readable and not executable",
       len(paths) == 2 and open(paths[0], encoding="utf-8").read() == "# Notes\nline two \u2014 caf\u00e9\n" and open(paths[1]).read() == '{"port": 8080}\n', paths)
 with open(os.path.join(D, "work", "reply.md"), "w") as f:
@@ -240,14 +246,36 @@ check("an agent sends a file by a path relative to its folder", "→ alex/termin
 out = cli("alex", "listen", "--as", "terminal", "--wait", "5")
 paths = saved(out, "alex")
 check("…and it lands on the other machine", len(paths) == 1 and open(paths[0]).read().startswith("relative paths"), out)
-out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [write("logo.png", b"\x89PNG\r\n\x1a\n\x00\x00")]}, meta)
+def work(name, data):
+    path = os.path.join(D, "work", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+    return name
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [work("logo.png", b"\x89PNG\r\n\x1a\n\x00\x00")]}, meta)
 check("a binary file is refused, saying why", "looks like a binary file" in out and "only text files" in out and "→" not in out, out)
-out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [write("big.log", "x" * (256 * 1024 + 1))]}, meta)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [work("term.log", "\x1b[31mred\x1b[0m\n")]}, meta)
+check("…and so is text with control characters", "control characters" in out and "→" not in out, out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [work("big.log", "x" * (256 * 1024 + 1))]}, meta)
 check("a file over 256 KB is refused", "a file can be at most 256 KB" in out and "→" not in out, out)
+# An agent sends only from its own folder: nothing outside it, nothing hidden (a prompt-injected agent can't mail secrets).
+work(".env", "SECRET=1\n")
+for path, why in [(notes, "outside this session's folder"), (".env", "hidden file"), ("../alice/machine.key", "outside this session's folder")]:
+    out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [path]}, meta)
+    check(f"an agent can't send {os.path.basename(path)} ({why})", why in out and "→" not in out, out)
 out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [notes] * 11}, meta)
 check("more than 10 files are refused", "at most 10" in out and "→" not in out, out)
 out = cli("alex", "send", "alice/work-codex", "--file", FILES, "x")
 check("a folder is not a file", "is not a file" in out, out)
+# A teammate's files are taken up to 20 MB an hour; past that their machine keeps them and retries later.
+quota = [write("q1.log", "q" * (256 * 1024)), write("q2.log", "r" * (256 * 1024))]
+# (alex sent a few small files above, so 39 of 512 KB fit the hour, and the 40th doesn't.)
+sent = [cli("alex", "send", "alice/work-codex", "--file", quota[0], "--file", quota[1], f"quota {i} (e2e test)") for i in range(39)]
+check("39 messages of 512 KB of files are taken", all("→ alice/work-codex" in o and "can't take" not in o for o in sent), sent[-1])
+out = cli("alex", "send", "alice/work-codex", "--file", quota[0], "--file", quota[1], "one more (e2e test)")
+check("…and the next waits: the sender's machine retries later", "can't take these files now" in out and "20 MB of files an hour from alex" in out, out)
+out = codex.tool("check_inbox", {}, meta)
+check("…the 39 arrive", out.count("quota ") == 39 and "one more" not in out, out[-500:])
 
 # --- Codex hooks: session via hooks, delivery via codex queue ---
 start = hook("alice", "codex", "session-start", {"session_id": "22222222-bbbb", "cwd": ROOT, "hook_event_name": "SessionStart"})
@@ -282,7 +310,7 @@ check("Reason Network held lists it", "held message" in out and "notes.md (saved
 cli("alice", "approve", "--all")
 out = codex.tool("check_inbox", {}, meta)
 check("approved message is delivered", "held message" in out, out)
-check("…with its files saved now", [os.path.basename(p) for p in saved(out, "alice")] == ["notes.md"], out)
+check("…with its files saved now", [os.path.basename(p) for p in saved(message_with(out, "held message"), "alice")] == ["notes.md"], out)
 # Refused: nothing of it is kept.
 text = open(cfg).read()
 open(cfg, "w").write(text.replace('alex = "hold"', 'alex = "refuse"'))

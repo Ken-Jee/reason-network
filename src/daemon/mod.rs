@@ -131,6 +131,8 @@ struct Inner {
     pairs: HashMap<(String, String), VecDeque<Instant>>,
     /// When the inbox folder was last swept of files no longer kept (ms).
     swept: i64,
+    /// Teammates' files taken in the last hour, for the quota.
+    quota: crate::files::Quota,
 }
 
 /// A session running on this machine.
@@ -191,6 +193,7 @@ impl Daemon {
                 polling: HashMap::new(),
                 pairs: HashMap::new(),
                 swept: 0,
+                quota: Default::default(),
             }),
             arrived: Notify::new(),
             git_cache: Mutex::new(HashMap::new()),
