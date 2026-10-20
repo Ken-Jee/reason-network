@@ -1,11 +1,13 @@
 """Two 'machines' (two REASON_NETWORK_HOMEs) on one box, talking over iroh, with simulated agent sessions.
 
-    cargo build && python3 tests/e2e/two_machines.py
+    cargo build && env -u CLAUDE_CODE_MESSAGING_SOCKET python3 tests/e2e/two_machines.py
 
 Needs internet (iroh relays/discovery). Run inside a Claude Code session, the simulated Claude session pushes its
 test messages into that real session (they say "ignore this").
 """
-import json, os, re, subprocess, tempfile, time
+import base64, json, os, re, subprocess, sys, tempfile, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from proofs import TRUST, keygen, proof
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.path.join(ROOT, "target", "debug", "reason-network")
@@ -17,6 +19,9 @@ QUEUE_LOG = os.path.join(D, "codex-queue.log")
 # Stands in for osascript / notify-send, so the test shows nothing on screen: each machine logs what it would show.
 FAKE_NOTIFY = os.path.join(D, "fake-notify.sh")
 IN_CLAUDE = "CLAUDE_CODE_MESSAGING_SOCKET" in os.environ
+# First on PATH: nothing here may open a browser or reach this machine's real notifications.
+FAKE_BIN = os.path.join(D, "bin")
+UNEXPECTED = os.path.join(D, "unexpected.log")
 results = []
 
 
@@ -27,6 +32,8 @@ def check(name, ok, detail=""):
 
 def env(who, strip_claude=True):
     e = dict(os.environ, REASON_NETWORK_HOME=H[who], REASON_NETWORK_MACHINE=MACHINE[who], REASON_NETWORK_NO_MDNS="1", REASON_NETWORK_NO_SERVICE="1", REASON_NETWORK_CODEX_BIN=FAKE_CODEX)
+    e.update({"HOME": os.path.join(D, "home"), "PATH": FAKE_BIN + os.pathsep + os.environ["PATH"], "REASON_NETWORK_NO_UPDATE": "1",
+              "REASON_NETWORK_NO_TRAY": "1", "REASON_NETWORK_TRUST_KEYS": TRUST})
     e.update({"REASON_NETWORK_OSASCRIPT_BIN": FAKE_NOTIFY, "REASON_NETWORK_NOTIFY-SEND_BIN": FAKE_NOTIFY, "DBUS_SESSION_BUS_ADDRESS": "test",
               "NOTIFY_LOG": os.path.join(D, f"notify-{who}.log")})
     if strip_claude:
@@ -41,6 +48,18 @@ def env(who, strip_claude=True):
 def cli(who, *args):
     r = subprocess.run([BIN, *args], env=env(who), capture_output=True, text=True, timeout=90)
     return (r.stdout + r.stderr).strip()
+
+
+def run(e, *args):
+    r = subprocess.run([BIN, *args], env=e, capture_output=True, text=True, timeout=90)
+    return r.stdout.strip(), (r.stdout + r.stderr).strip()
+
+
+def as_json(text):
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {}
 
 
 def hook(who, agent, event, payload):
@@ -83,33 +102,129 @@ os.chmod(FAKE_CODEX, 0o755)
 with open(FAKE_NOTIFY, "w") as f:
     f.write('#!/bin/sh\nprintf "%s\\n" "$*" >> "$NOTIFY_LOG"\n')
 os.chmod(FAKE_NOTIFY, 0o755)
+os.makedirs(FAKE_BIN)
+os.makedirs(os.path.join(D, "home"))
+for name in ("open", "xdg-open", "osascript", "notify-send"):
+    with open(os.path.join(FAKE_BIN, name), "w") as f:
+        f.write(f'#!/bin/sh\nprintf "{name} %s\\n" "$*" >> {UNEXPECTED}\n')
+    os.chmod(os.path.join(FAKE_BIN, name), 0o755)
 
 
 def shown(who):
     time.sleep(0.5)
     p = os.path.join(D, f"notify-{who}.log")
     return open(p).read() if os.path.exists(p) else ""
+
+
+def link_relays(link):
+    """A team link's relay fields: the team's own, and the inviting machine's (0xFF: one of n0's, by region)."""
+    t = re.split(r"#rn1-|#tincan1", link)[1]
+    raw, at, fields = base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)), 32, []
+    for _ in range(3):  # the team name first
+        short = raw[at] == 0xFF
+        at += short
+        fields.append(("n0 " if short else "") + raw[at + 1:at + 1 + raw[at]].decode())
+        at += 1 + raw[at]
+    return fields[1:]
 os.makedirs(os.path.join(D, "work"), exist_ok=True)
 
-# --- team formation ---
-out = cli("alex", "init", "vibes", "--as", "alex", "--no-setup")
-check("init creates team", "Created team vibes. You are alex on laptop." in out, out)
+# --- team formation, signed in with Reason ---
+ep = {who: cli(who, "endpoint") for who in H}
+check("endpoint prints this machine's id, before any team", all(re.fullmatch(r"[0-9a-f]{64}", e) for e in ep.values()), ep)
+check("…the same one each time", cli("alex", "endpoint") == ep["alex"], ep)
+out = cli("alex", "init", "vibes", "--as", "whoever", "--proof", proof("u_alex", "alex", ep["alex"]), "--no-setup")
+check("init with a proof: the name is the proof's", "Created team vibes. You are alex on laptop." in out, out)
+check("…and prints the invite line", re.search(r"Invite people with this line:\nJoin the Reason Network: https://reasonmachines.com/network/join/#rn1-\S+", out) is not None, out)
 out = cli("alex", "invite")
-link = re.search(r"(https://\S+/join/#tincan1\S+)", out)
-check("invite prints the team link", bool(link), out)
-out = cli("alice", "join", link.group(1), "--as", "alice", "--no-setup")
-check("join with the team link succeeds", "Joined team vibes as alice on desktop." in out, out)
-check("joiner sees alex connected", re.search(r"alex\s+laptop\s+(direct|relay)", out) is not None, out)
+link = re.search(r"(https://\S+/join/#rn1-\S+)", out)
+check("invite prints the team link, as an rn1 link", bool(link), out)
+check("…in the invite line", f"Join the Reason Network: {link.group(1) if link else '?'}" in out, out)
+out, _ = run(env("alice"), "join", link.group(1), "--as", "alice", "--proof", proof("u_alice", "alice", ep["alice"]), "--no-setup", "--json")
+j = as_json(out)
+check("join with a proof and --json gives the team", j.get("team_name") == "vibes" and j.get("person") == "alice" and j.get("machine") == "desktop"
+      and j.get("endpoint") == ep["alice"] and re.fullmatch(r"[0-9a-f]{32}", j.get("team_id", "")) is not None, out)
+check("…with the link and invite line", j.get("link", "").startswith("https://reasonmachines.com/network/join/#rn1-")
+      and j.get("invite_line") == f"Join the Reason Network: {j.get('link')}", out)
+members = {m["person"]: m for m in j.get("members", [])}
+check("…and both people verified", members.get("alex", {}).get("verified") is True and members.get("alice", {}).get("verified") is True, out)
+time.sleep(3)
+out = cli("alice", "team")
+check("joiner sees alex connected, verified", re.search(r"alex \(verified\)\s+laptop\s+(direct|relay)", out) is not None, out)
 out = cli("alex", "team")
-check("founder sees alice connected", re.search(r"alice\s+desktop\s+(direct|relay)", out) is not None, out)
+check("founder sees alice connected, verified", re.search(r"alice \(verified\)\s+desktop\s+(direct|relay)", out) is not None, out)
+check("a team without a relay of its own is on Reason's: the link names it as where alex is",
+      link_relays(link.group(1)) == ["", "https://relay-sfo1.compute.reasonmachines.com/"] and "(Reason's, the default)" in out, out)
+j = as_json(cli("alex", "team", "--json"))
+check("team --json marks people verified, and each machine's proof", [(m["verified"], m["has_proof"]) for m in j.get("members", [])] == [(True, True)] * 2
+      and j.get("link", "").startswith("https://") and j.get("team_name") == "vibes" and len(j.get("team_id", "")) == 32, j)
+j = as_json(cli("alex", "link", "--json"))
+check("link --json gives the invite line", j.get("invite_line", "").startswith("Join the Reason Network: https://reasonmachines.com/network/join/#rn1-"), j)
+out = cli("alex", "link")
+check("link prints the invite line", "Join the Reason Network: https://reasonmachines.com/network/join/#rn1-" in out, out)
+j = as_json(cli("alex", "who", "--json"))
+check("who --json marks machines verified", all(m.get("verified") for m in j.get("machines", [])) and len(j.get("machines", [])) == 2, j)
+out = cli("alice", "proof", proof("u_alice", "alice", ep["alice"]))
+check("proof refreshes this machine's proof", "alice on desktop is verified, for 89 more days." in out or "for 90 more days." in out, out)
+out = cli("alice", "proof", proof("u_alice", "alicia", ep["alice"]))
+check("…but not one for another name", "this proof is for alicia, but this machine is alice in the team" in out, out)
+# Someone else signed in, or not at all, can't be alex or alice; a proof Reason didn't sign, or for another machine, gets nobody in.
+mal = dict(env("alice"), REASON_NETWORK_HOME=os.path.join(D, "mallory"), REASON_NETWORK_MACHINE="evil")
+mal_ep = run(mal, "endpoint")[0]
+out, both = run(mal, "join", link.group(1), "--proof", proof("u_mallory", "alex", mal_ep), "--no-setup", "--json")
+check("a name verified by another account is taken: name_taken", as_json(out) == {"error": "name_taken"}, both)
+out, both = run(mal, "join", link.group(1), "--as", "alice", "--no-setup", "--json")
+check("…and without a proof too", as_json(out) == {"error": "name_taken"}, both)
+_, out = run(mal, "join", link.group(1), "--proof", proof("u_mallory", "mallory", mal_ep, key=keygen()), "--no-setup")
+check("a forged proof is refused", "signature doesn't verify" in out and "Joined" not in out, out)
+_, out = run(mal, "join", link.group(1), "--proof", proof("u_alex", "alex", ep["alex"]), "--no-setup")
+check("someone else's proof is refused", "for another machine" in out and "Joined" not in out, out)
+_, out = run(mal, "init", "x", "--proof", proof("u_mallory", "mallory", mal_ep, aud="reason"), "--no-setup")
+check("init refuses a proof for something else", "isn't from Reason Network" in out and "Created" not in out, out)
+out, both = run(mal, "join", link.group(1), "--proof", "garbage", "--no-setup", "--json")
+check("with --json every failure is JSON", as_json(out) == {"error": "this sign-in proof is damaged"}, both)
+# The Reason CLI joins over the daemon's socket (the proof never on a command line): its error replies carry a code.
+sock_path = os.path.join(mal["REASON_NETWORK_HOME"], "network.sock")
+if len(sock_path) < 100:  # longer ones get a hashed name elsewhere (see paths::socket)
+    import socket
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(90)
+        sock.connect(sock_path)
+        req = {"id": 1, "op": "join", "ticket": link.group(1), "person": "x", "proof": proof("u_mallory", "alex", mal_ep)}
+        sock.sendall((json.dumps(req) + "\n").encode())
+        reply = as_json(sock.makefile().readline())
+    check("over the socket, a taken name's error reply has code name_taken",
+          reply.get("id") == 1 and reply.get("ok") is False and reply.get("code") == "name_taken"
+          and "is already in this team" in reply.get("error", ""), reply)
+else:
+    check("the socket's path is short enough to reach (set TMPDIR shorter)", False, sock_path)
+code = re.search(r"Invite code for a teammate: ([a-z]+(?:-[a-z]+){3})", cli("alex", "invite", "--code"))
+_, out = run(mal, "join", code.group(1), "--proof", proof("u_mallory", "mallory", mal_ep), "--no-setup")
+check("a sign-in joins only with a link, never a four-word code", "not a four-word code" in out and "Joined" not in out, out)
+run(mal, "stop")
+check("alex's team still has just the two", len(as_json(cli("alex", "team", "--json")).get("members", [])) == 2)
+# alex signed in on a second computer: the same account takes its name there, let in by anyone's machine.
+mini = dict(env("alex"), REASON_NETWORK_HOME=os.path.join(D, "alex-mini"), REASON_NETWORK_MACHINE="mini")
+mini_ep = run(mini, "endpoint")[0]
+alice_link = re.search(r"(https://\S+#rn1-\S+)", cli("alice", "link")).group(1)
+_, out = run(mini, "join", alice_link, "--proof", proof("u_alex", "alex", mini_ep), "--no-setup")
+check("another computer of the same account joins under its verified name (alice's link: alex's machine lets it in)", "Joined team vibes as alex on mini." in out, out)
+check("…and gets the invite line", "Join the Reason Network: https://reasonmachines.com/network/join/#rn1-" in out, out)
+time.sleep(3)
+out = cli("alex", "team")
+check("…which every machine takes", re.search(r"alex \(verified\)\s+mini", out) is not None, out)
+run(mini, "leave")
+run(mini, "stop")
 out = cli("alice", "join", link.group(1), "--as", "bob", "--no-setup")
 check("joining a second team is refused while yours has others, and says how to switch",
       "already in team 'vibes' (with alex)" in out and "reason-network leave" in out, out)
 # Installed on its own and started a team by itself first: the team link still just works.
 sam = dict(env("alice"), REASON_NETWORK_HOME=os.path.join(D, "sam"), REASON_NETWORK_MACHINE="mini")
 r = subprocess.run([BIN, "init", "solo", "--as", "sam", "--no-setup"], env=sam, capture_output=True, text=True, timeout=90)
-r = subprocess.run([BIN, "join", link.group(1), "--as", "sam", "--no-setup"], env=sam, capture_output=True, text=True, timeout=90)
-check("a team of one is swapped for the team you join", "Joined team vibes as sam on mini." in r.stdout, r.stdout + r.stderr)
+# (With a link as earlier builds wrote it.)
+old_link = link.group(1).replace("#rn1-", "#tincan1")
+r = subprocess.run([BIN, "join", old_link, "--as", "sam", "--no-setup"], env=sam, capture_output=True, text=True, timeout=90)
+check("a team of one is swapped for the team you join (a tincan1 link)", "Joined team vibes as sam on mini." in r.stdout, r.stdout + r.stderr)
+check("…unverified, without a proof", re.search(r"sam\s+mini", r.stdout) is not None and "sam (verified)" not in r.stdout, r.stdout)
 subprocess.run([BIN, "leave"], env=sam, capture_output=True, timeout=60)
 subprocess.run([BIN, "stop"], env=sam, capture_output=True)
 os.makedirs(os.path.join(D, "bob"), exist_ok=True)
@@ -135,7 +250,8 @@ meta = {"sessionId": "11111111-aaaa", "threadId": "11111111-aaaa"}
 time.sleep(7)  # Claude's session registers after 3s; presence propagates every 2s
 out = codex.tool("list_team", {}, meta)
 claude_name = os.path.basename(ROOT).lower() + "-claude"
-check("alice's agent sees alex's session across machines", claude_name in out and "alex · laptop" in out, out)
+check("alice's agent sees alex's session across machines", claude_name in out and "alex (verified) · laptop" in out, out)
+check("list_team gives the invite line", "Invite people with this line: Join the Reason Network: https://reasonmachines.com/network/join/#rn1-" in out, out)
 # (After Codex's first tool call registered it.) Nobody reports a status: Reason Network reads the plan step in progress from Codex's own transcript.
 rollout = os.path.join(D, "rollout.jsonl")
 plan = {"plan": [{"step": "set up fixtures", "status": "completed"}, {"step": "testing cross-machine Reason Network", "status": "in_progress"}]}
@@ -206,6 +322,77 @@ out = cli("alex", "send", "alice/work-codex", "reply while you wait")
 t.join()
 check("long-poll returns the message that arrives", "reply while you wait" in waited.get("out", ""), waited)
 
+# --- small text files ---
+FILES = os.path.join(D, "files")
+os.makedirs(FILES, exist_ok=True)
+def write(name, data):
+    path = os.path.join(FILES, name)
+    with open(path, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+    return path
+def inbox(who):
+    p = os.path.join(H[who], "inbox")
+    return sorted(os.listdir(p)) if os.path.isdir(p) else []
+def message_with(out, text):
+    """The part of an inbox listing for the message saying `text`: its frame and the file list after it."""
+    return next((part for part in out.split("<reason-message") if text in part.split("</reason-message>")[0]), "")
+def saved(out, who):
+    """The file paths a message lists, if each is in `who`'s inbox folder, readable and not executable."""
+    paths = re.findall(r"^- (/.+)$", out, re.M)
+    ok = all(p.startswith(os.path.join(H[who], "inbox") + os.sep) and os.path.isfile(p) and not os.stat(p).st_mode & 0o111
+             for p in paths)
+    return paths if ok else []
+notes = write("notes.md", "# Notes\nline two \u2014 caf\u00e9\n")
+config = write("app.json", '{"port": 8080}\n')
+out = cli("alex", "send", "alice/work-codex", "--file", notes, "--file", config, "the notes and the config (e2e test)")
+check("a send with files is accepted", "→ alice/work-codex" in out and "refused" not in out, out)
+out = codex.tool("check_inbox", {}, meta)
+paths = saved(out, "alice")
+check("files arrive in the message, listed by where they are saved",
+      "Files they sent with" in out.split("</reason-message>")[-1] and [os.path.basename(p) for p in paths] == ["notes.md", "app.json"], out)
+check("…in folders named by the recipient, not by the sender's message id",
+      all(re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", os.path.basename(os.path.dirname(p))) for p in paths)
+      and re.search(r'id="([0-9A-Z]{26})"', out).group(1) not in inbox("alice"), out)
+check("…with the same text, readable and not executable",
+      len(paths) == 2 and open(paths[0], encoding="utf-8").read() == "# Notes\nline two \u2014 caf\u00e9\n" and open(paths[1]).read() == '{"port": 8080}\n', paths)
+with open(os.path.join(D, "work", "reply.md"), "w") as f:
+    f.write("relative paths are from the agent's folder\n")
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "a file back (e2e test)", "files": ["reply.md"]}, meta)
+check("an agent sends a file by a path relative to its folder", "→ alex/terminal" in out and "refused" not in out, out)
+out = cli("alex", "listen", "--as", "terminal", "--wait", "5")
+paths = saved(out, "alex")
+check("…and it lands on the other machine", len(paths) == 1 and open(paths[0]).read().startswith("relative paths"), out)
+def work(name, data):
+    path = os.path.join(D, "work", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+    return name
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [work("logo.png", b"\x89PNG\r\n\x1a\n\x00\x00")]}, meta)
+check("a binary file is refused, saying why", "looks like a binary file" in out and "only text files" in out and "→" not in out, out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [work("term.log", "\x1b[31mred\x1b[0m\n")]}, meta)
+check("…and so is text with control characters", "control characters" in out and "→" not in out, out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [work("big.log", "x" * (256 * 1024 + 1))]}, meta)
+check("a file over 256 KB is refused", "a file can be at most 256 KB" in out and "→" not in out, out)
+# An agent sends only from its own folder: nothing outside it, nothing hidden (a prompt-injected agent can't mail secrets).
+work(".env", "SECRET=1\n")
+for path, why in [(notes, "outside this session's folder"), (".env", "hidden file"), ("../alice/machine.key", "outside this session's folder")]:
+    out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [path]}, meta)
+    check(f"an agent can't send {os.path.basename(path)} ({why})", why in out and "→" not in out, out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [notes] * 11}, meta)
+check("more than 10 files are refused", "at most 10" in out and "→" not in out, out)
+out = cli("alex", "send", "alice/work-codex", "--file", FILES, "x")
+check("a folder is not a file", "is not a file" in out, out)
+# A teammate's files are taken up to 20 MB an hour; past that their machine keeps them and retries later.
+quota = [write("q1.log", "q" * (256 * 1024)), write("q2.log", "r" * (256 * 1024))]
+# (alex sent a few small files above, so 39 of 512 KB fit the hour, and the 40th doesn't.)
+sent = [cli("alex", "send", "alice/work-codex", "--file", quota[0], "--file", quota[1], f"quota {i} (e2e test)") for i in range(39)]
+check("39 messages of 512 KB of files are taken", all("→ alice/work-codex" in o and "can't take" not in o for o in sent), sent[-1])
+out = cli("alex", "send", "alice/work-codex", "--file", quota[0], "--file", quota[1], "one more (e2e test)")
+check("…and the next waits: the sender's machine retries later", "can't take these files now" in out and "20 MB of files an hour from alex" in out, out)
+out = codex.tool("check_inbox", {}, meta)
+check("…the 39 arrive", out.count("quota ") == 39 and "one more" not in out, out[-500:])
+
 # --- Codex hooks: session via hooks, delivery via codex queue ---
 start = hook("alice", "codex", "session-start", {"session_id": "22222222-bbbb", "cwd": ROOT, "hook_event_name": "SessionStart"})
 codex_name = os.path.basename(ROOT).lower() + "-codex"
@@ -228,15 +415,33 @@ cli("alice", "stop")
 time.sleep(3)
 cli("alice", "team")
 time.sleep(5)
-out = cli("alex", "send", "alice/work-codex", "held message")
+before = inbox("alice")
+out = cli("alex", "send", "alice/work-codex", "--file", notes, "held message")
 check("message to alice is held by her policy", "held until alice approves" in out, out)
 out = codex.tool("check_inbox", {}, meta)
 check("held message is not delivered", "held message" not in out, out)
+check("…and its files aren't saved yet", inbox("alice") == before, inbox("alice"))
 out = cli("alice", "held")
-check("Reason Network held lists it", "held message" in out, out)
+check("Reason Network held lists it", "held message" in out and "notes.md (saved once approved)" in out, out)
 cli("alice", "approve", "--all")
 out = codex.tool("check_inbox", {}, meta)
 check("approved message is delivered", "held message" in out, out)
+check("…with its files saved now", [os.path.basename(p) for p in saved(message_with(out, "held message"), "alice")] == ["notes.md"], out)
+# Refused: nothing of it is kept.
+text = open(cfg).read()
+open(cfg, "w").write(text.replace('alex = "hold"', 'alex = "refuse"'))
+cli("alice", "stop")
+time.sleep(3)
+cli("alice", "team")
+time.sleep(5)
+before = inbox("alice")
+out = cli("alex", "send", "alice/work-codex", "--file", notes, "refused message")
+check("a refused message's files are never saved", "doesn't accept messages from alex" in out and inbox("alice") == before, out)
+open(cfg, "w").write(text)
+cli("alice", "stop")
+time.sleep(3)
+cli("alice", "team")
+time.sleep(5)
 
 # --- offline machine: outbox ---
 codex.close()
@@ -259,6 +464,7 @@ check("remove alice (while her machine is off)", "Removed alice on desktop" in o
 check("removing someone replaces the team link", "team link changed" in out, out)
 out = cli("alex", "link")
 check("the new link differs from the old one", link.group(1) not in out, out)
+check("…and is still an rn1 link", "#rn1-" in out, out)
 cli("alice", "team")  # alice's machine comes back and dials alex
 time.sleep(10)
 out = cli("alice", "team")
@@ -267,5 +473,7 @@ check("alice's machine learns it was removed when it reconnects", "not in a team
 claude.close()
 cli("alex", "stop")
 cli("alice", "stop")
+log = open(UNEXPECTED).read() if os.path.exists(UNEXPECTED) else ""
+check("nothing opened a browser or reached the real notifications", log == "", log)
 print(f"\n{sum(results)}/{len(results)} checks passed  (state in {D})")
 raise SystemExit(0 if all(results) else 1)

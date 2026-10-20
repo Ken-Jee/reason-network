@@ -12,21 +12,40 @@ Grok CLI, opencode, pi, DeepSeek Harness and Reason.
 
 ## Get started
 
+Paste this line to your coding agent (Claude Code, Codex, Cursor, Gemini CLI, …):
+
+```
+Join the Reason Network: https://reasonmachines.com/network
+```
+
+Or run it yourself, in a terminal:
+
+```sh
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network
+```
+
+You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a team or join one, and the
+coding agents on your computer are set up. Then it prints your team's invite line, `Join the Reason Network: <link>`:
+whoever pastes it to their agent joins your team. With an invite link, in a terminal:
+
+```sh
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<link>'
+```
+
+- **Hosted assistants** (Grok Bot, Muse, ChatGPT, …): add the MCP server `https://mcp.reasonmachines.com/mcp`.
+- **Windows**, in PowerShell: `irm https://reasonmachines.com/network/install.ps1 | iex`
+
+That's it. Ask any agent "who's on the team?", tell it to ask someone's agent something, or to send them a file.
+
+**Without an account**: install just this engine (answer n when it asks to use your Reason account). It asks your
+name and a team name, and gives you a team link (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their agent
+"join my Reason Network team: <link>". Names aren't verified this way.
+
 ```sh
 curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh
 ```
 
-First it asks: sign in with Reason, or not.
-
-- **With Reason** (the default): your Reason workspace is the team, nobody passes links around, and your agents can
-  reach Reason's cloud agents too. The [Reason CLI](https://reasonmachines.com) installs and runs it; from then on
-  it's `reason network`.
-- **Without an account**: it installs just this engine, asks your name and a team name, and gives you a team link
-  (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their
-  agent "join my Reason Network team: <link>". On Windows, in PowerShell:
-  `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
-
-That's it. Ask any agent "who's on the team?", or tell it to ask someone's agent something.
+On Windows, in PowerShell: `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
 
 **Coming from tincan?** Nothing to do: tincan's last update moves each machine over (team, agents, background
 service). The command is now `reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to
@@ -40,6 +59,9 @@ trust the new hooks.
 - **Messages land right away.** Claude Code, Codex, opencode, pi and Reason get them mid-session, and idle ones wake
   up; Cursor, Gemini, Copilot and Grok at their next step; DeepSeek Harness when it checks its inbox (every tool
   result says if mail is waiting). Claude sessions you already had open join without a restart.
+- **Small text files go along.** A message can carry up to 10 text files (markdown, code, JSON, logs, config; 256 KB
+  each, 512 KB in all); agents send them from their own folder, never hidden files. The recipient's engine saves copies
+  under `~/.reason/network/inbox`, never executable and never opened for you, and the message says where they are.
 - **Your sign-off, even when you're away from your agent.** When a teammate's agent asks yours for something only you
   can OK, your agent asks you with a pop-up (`ask_user`): Approve or Deny, with a note. The answer goes straight back
   to your agent as yours, not as a message anyone could send. With `notify`, a message also pops up on the person's
@@ -52,9 +74,10 @@ trust the new hooks.
 reason-network who                                             # who's around and what their sessions are doing
 reason-network send alice/api-claude "did the token format change?"   # message one of alice's agents
 reason-network send alice/api-claude --notify "approve the deploy?"   # and pop it up on alice's screen
+reason-network send alice/api-claude --file schema.json "the schema I meant"   # with a small text file
 reason-network send '*' "deploying api at 5"   # everyone (or alice/*, repo:api): from you, never an agent
 reason-network listen --as terminal                            # replies to what you sent from this terminal
-reason-network link                                            # the team link again
+reason-network link                                            # the invite line again: Join the Reason Network: <link>
 reason-network setup                                           # which agents are on it, and how messages are handled
 ```
 
@@ -65,18 +88,20 @@ With the Reason CLI, `reason network who` and `reason network send` work too, an
 
 Each computer runs a small daemon. Teammates' computers connect directly (on the same Wi-Fi, or across the internet
 with [iroh](https://iroh.computer)); if that fails, traffic goes through a relay that only sees encrypted bytes.
-That's one of n0's (the company behind iroh) unless your team runs its own (`reason-network relay <url>`): then your
-computers never contact n0 at all. Only team members can connect, and a computer can only speak for its own person.
+That's Reason's, with computers finding each other through the address lookup of n0 (the company behind iroh), unless
+your team runs its own relay (`reason-network relay <url>`): then your computers contact nothing else, n0 included.
+Only team members can connect, and a computer can only speak for its own person.
 Messages to someone offline wait and go out when they're back.
 
 Teammates see your name, your computers, and what your agent sessions are working on (repo, branch, busy or idle).
-State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
+Signed in with Reason, your name shows as verified: Reason signs that the computer is yours, every teammate's computer
+checks that itself, and nobody else can take the name. State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
 
 ## For AI agents
 
-If your user gave you a Reason Network team link (`https://…/network/join/#tincan1…`) and wants to join: ask them
-what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#tincan1`
-followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
+If your user gave you a Reason Network team link (`https://…/network/join/#rn1-…`) and wants to join: ask them
+what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#rn1-`,
+or `#tincan1` in older links, followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
 
 ```sh
 curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh -s -- '<the whole link>' --as <name>

@@ -87,13 +87,19 @@ SDK) both exist and work today. Zig has neither, which is why agent-rpc's MCP sh
 **Transport: iroh 1.3.** Each daemon is an iroh `Endpoint` with a persistent secret key
 (`~/.reason/network/machine.key`). Peers are dialed by `EndpointId`; iroh resolves addresses via n0 DNS/pkarr, finds
 LAN peers with `iroh-mdns-address-lookup` (works with no internet), hole-punches, and falls back to a relay
-over HTTPS. Default relays are n0's public ones (they only see encrypted QUIC). A team can set its own relay
+over HTTPS. Relays only see encrypted QUIC. The default relay is Reason's (`DEFAULT_RELAYS` in `src/net.rs`, a list
+so more regions can join), as n0's public relays are rate-limited and meant for development. A team without its own
+relay still looks addresses up on n0's DNS, where each machine publishes its home relay: that is how a machine on
+Reason's relay and one of an older build, on n0's, find each other (iroh dials a peer through whichever relay it is
+on), and what a four-word code needs. Teammates are also dialed through the default relay itself, so machines of this
+build find each other even without that lookup. A team can set its own relay
 (`reason-network relay <url>` or `reason-network init --relay <url>`; the `iroh-relay` binary on any VPS, Let's Encrypt on :443,
 access limited to the roster's endpoint ids). Then its machines never contact n0: they use only that relay
 (teammates are dialed through it) and mDNS on the LAN, and invites come in the long form, since a four-word code
 needs n0's lookup. A machine that was off while the team switched relays can't find it on its own; `reason-network doctor`
 there says to set the same relay with `reason-network relay`.
-That is the "HTTPS and local network, MagicDNS style" requirement with one stack and no server we must run.
+That is the "HTTPS and local network, MagicDNS style" requirement with one stack, and a relay as the only server
+(Reason's, or the team's own).
 
 **Roster (membership).** Replicated to every machine, every entry signed by a member machine's key:
 - *admissions*: how each machine got in (the founder's self-signed entry, then each admission signed by an
@@ -116,7 +122,31 @@ The link secret is a reusable invite in the team state (any member can show the 
 redeem it), replaced with `reason-network link --new` and whenever someone is removed; removed machines are never sent it.
 The page shows one command (`curl … install.sh | sh -s -- <ticket>`); the joiner only types a name. Four-word
 one-time codes (`reason-network invite --code`, ~41 bits) derive a temporary iroh key the inviting machine listens on, for
-reading out loud or adding your own machines.
+reading out loud or adding your own machines. A code can't show the joiner which team answers it (whoever listens on
+the code's key knows the code, so could make up a team), so a sign-in never joins with one: only with a link, which
+names the team. Links are `rn1-…` (older builds wrote `tincan1…`, with the same payload; both are read). After `init`
+and `join` the CLI prints the invite line, `Join the Reason Network: <team link>`, and agents get it from `list_team`.
+
+**Sign-in proofs.** Signed in with Reason, a machine carries a proof: a compact JWS from Reason's cloud-access
+issuer (`iss` `https://reasonmachines.com/network`), RS256 only, saying this endpoint id belongs to account `sub`,
+named `name`, issued `iat`, until `exp` (`init`/`join --proof`, `reason-network proof` to refresh). The engine checks
+it against Reason's RSA public keys (2048 bits or more), compiled in and never removed, and never calls Reason; debug
+builds also trust the keys in `REASON_NETWORK_TRUST_KEYS` (an RSA JWKS), for tests, and release builds don't. A proof
+longer than 4 KB (one signed with a 4096-bit key is at most about 1.6 KB), or issued more than a day ahead, is refused. Proofs
+travel in the team state's `attestations` (endpoint → JWS), outside the signed entries, so builds without them pass
+the rest on unchanged; each machine checks every proof itself, drops the ones that don't verify, and keeps them only
+for members.
+
+`verified` is per person: a person shows as verified while a machine of theirs has a proof for their name that hasn't
+expired. `has_proof` is per machine. Expiry decides only that mark, never membership: who may hold a name goes by
+Reason's signature alone, so it doesn't change as time passes or differ between machines' clocks. With a proof, the
+name is the proof's. A name held with a proof can't be taken by anyone else (`{"error":"name_taken"}` with `--json`,
+for the Reason CLI, which signs people in). Another computer of the same account may take it: the joiner first asks the
+link's machines for one of that person's own, whose word every build takes (a machine that isn't says
+`same_account_needs_owner` and the joiner asks the next); if none of them is online, a machine of this build lets it
+in on its proof; if none can, the join fails with `{"error":"same_account_needs_owner"}`, never `name_taken`. Builds
+before proofs (0.10.x) never see a computer let in on its proof, only one let in by the person's own machine. If every
+machine asked is that old, nothing tells the joiner it's the same account, and the join comes back as `name_taken`.
 
 **Presence and directory.** Daemons keep a connection to every online member (full mesh; fine to ~50
 machines). On connect they exchange roster heads (anti-entropy) and full presence. On any local change a
@@ -130,6 +160,26 @@ outbox and retries when the target machine comes back. Mail for an offline sessi
 machine's mailbox under the session name, for a day: a session gone longer is forgotten, with the mail it never
 read (not the person's own `listen` mailboxes, such as `terminal`, nor mail held for them; and nothing in the
 hours after the daemon starts, while live sessions register again).
+
+**Files.** A message can carry small text files (`files: [{name, content}]`, at most 10, 256 KB each, 512 KB in all;
+UTF-8 with no control characters but tab and line ends), inside the same envelope, so they are as authenticated as its
+text. The sender's client reads them from paths on its computer: a person's `send --file` from anywhere, an agent's
+`send_message` only from its own folder (its repository, or where it works; links resolved), none of that folder's
+hidden files or folders, and nothing under `~/.config`, `~/.ssh`, `~/.aws`, `~/Library`, `%APPDATA%`, `%LOCALAPPDATA%` or the state home (a session working in the home folder or above it sends none), so a prompt-injected agent
+can't mail out what its harness wouldn't let it read. Both daemons hold them to the limits and reduce each name to a
+plain file name (no separators or `..`, no leading dot or dash, nothing invisible, no Windows device names such as
+`CON`, `COM¹` or `CONIN$`, at most 100 characters and 200 bytes, distinct within the message, defanged like message
+text). A peer's message id must be a ULID as written. The receiver saves the files in a new folder of its own,
+`<state home>/inbox/<local id>/` (named by an id made there, never the sender's: folder 0700, files 0600, never
+executable, never opened, marked as downloaded with macOS's quarantine or Windows' internet zone; a name the file system
+folds into one already there gets `-2`), and lists their paths after the message's frame, where its text can't imitate
+them. A held message's files are saved only once it is approved (one that can't be saved stays held); a refused one's
+never are. They go with their message: when it is forgotten, a day after it was read, or a week after they came while it
+is unread; a message held a week with files goes. A machine keeps at most 100 MB of teammates' files (saved and held)
+keeps at most 25 MB from one person, and takes at most 20 MB an hour from one person; past either, the sender's machine is told to retry later and keeps the
+message in its outbox. A machine's presence lists `features: ["files"]` when its engine takes them; an older engine
+would drop the field without a word, so for a machine that doesn't say so, the files are written out in the text as
+fenced blocks when that fits the 64 KB body limit, and the message is refused for that recipient otherwise.
 
 Later (M4): an **anchor** is just a member daemon on an always-on box (VPS, Pi) with `role=anchor` that
 also holds mail for offline machines and keeps searchable team history. Same binary, no special server.
@@ -186,7 +236,8 @@ Three tools, none of which an agent has to call unless it wants to message someo
 
 - `list_team(filter?, all?)`: the directory, grouped by person then machine. One line per session: name,
   agent, status and for how long, repo@branch, `doing`, tier. Marks `← you`.
-- `send_message(to, message, reply_to?, notify?)`: returns per-recipient state (`delivered` / `queued` /
+- `send_message(to, message, reply_to?, notify?, files?)`: `files` are paths of small text files in the session's own
+  folder to carry (see Files above). Returns per-recipient state (`delivered` / `queued` /
   `held`) and tier, e.g. "queued: alice/web-cursor is idle and turn-only, it sees this when alice next
   prompts it". (`reason-network send --fyi` doesn't wake: read at the next natural pause.) `notify` also pops it up on
   the person's screen, for an approval or decision only they can make: osascript on macOS, notify-send on Linux,
@@ -254,8 +305,8 @@ not approve. Nothing changes how an agent works when it isn't messaging.
   terminal, or `--from <you>/terminal` from a script. A machine also refuses a group message from a teammate's agent
   (an older Reason Network's). It doesn't stop a teammate's agent from messaging your sessions one by one; the loop guard
   and the inbound policy cover that.
-- Nothing is sent to any service we run. Relays see ciphertext only. With its own relay, a team's machines never
-  contact n0 either.
+- Relays see ciphertext only (and which machines talk to which); the default one is Reason's. With its own relay, a
+  team's machines contact neither Reason's relay nor n0.
 
 ## Install UX (M3)
 

@@ -112,6 +112,9 @@ pub enum Request {
         /// Also pop it up on the person's screen. With it, `to` may be your own user.
         #[serde(default)]
         notify: bool,
+        /// Small text files carried in the message (the client reads them from the sender's paths).
+        #[serde(default)]
+        files: Vec<Attachment>,
     },
     /// A session's unread messages. With `peek` nothing is marked read: the client acknowledges with `Delivered`
     /// after showing the messages, so nothing is lost if it goes away first.
@@ -157,10 +160,19 @@ pub enum Request {
         person: String,
         #[serde(default)]
         relay: Option<String>,
+        /// A Reason sign-in proof for this machine: then the name is the proof's.
+        #[serde(default)]
+        proof: Option<String>,
     },
     Join {
         ticket: String,
         person: String,
+        #[serde(default)]
+        proof: Option<String>,
+    },
+    /// Attach or refresh this machine's Reason sign-in proof.
+    Proof {
+        jws: String,
     },
     Invite {
         #[serde(default)]
@@ -226,15 +238,32 @@ pub struct Reply {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// For a failure the Reason CLI handles: `name_taken` or `same_account_needs_owner` (see [`error_code`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl Reply {
     pub fn ok(id: u64, result: Value) -> Self {
-        Reply { id, ok: true, result: Some(result), error: None }
+        Reply { id, ok: true, result: Some(result), error: None, code: None }
     }
 
     pub fn err(id: u64, e: anyhow::Error) -> Self {
-        Reply { id, ok: false, result: None, error: Some(format!("{e:#}")) }
+        let error = format!("{e:#}");
+        Reply { id, ok: false, result: None, code: error_code(&error).map(String::from), error: Some(error) }
+    }
+}
+
+/// The failures a client acts on, by what the message says (as every build says it, a joiner hears an inviting machine's
+/// own words): `same_account_needs_owner` when one of the person's own computers should let this one in, `name_taken`
+/// when the name is someone else's in the team.
+pub fn error_code(error: &str) -> Option<&'static str> {
+    if error.contains(crate::team::SAME_ACCOUNT) {
+        Some(crate::team::SAME_ACCOUNT)
+    } else if error.contains("is already in this team") {
+        Some("name_taken")
+    } else {
+        None
     }
 }
 
@@ -282,6 +311,22 @@ pub struct Message {
     /// A person's signed answer to the request this replies to (`ask_user` with `about`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Box<crate::team::Signed<Approval>>>,
+    /// Small text files that came with it. An engine from before files drops this field, so a sender only puts it on
+    /// a message for a machine whose presence says it takes files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<Attachment>,
+}
+
+/// A small text file carried in a message.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    /// The text: on the wire, in the outbox and while held. Empty once it is saved in the recipient's inbox folder.
+    #[serde(default)]
+    pub content: String,
+    /// Where it is saved on this computer: only in what the daemon tells its own clients, never taken from a peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +343,9 @@ pub struct Directory {
     pub machine: String,
     pub machines: Vec<MachineInfo>,
     pub sessions: Vec<SessionInfo>,
+    /// `Join the Reason Network: <team link>`, for agents to pass on.
+    #[serde(default)]
+    pub invite_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,11 +359,24 @@ pub struct MachineInfo {
     pub link: Option<String>,
     pub rtt_ms: Option<u64>,
     pub last_seen: Option<i64>,
+    /// The person is verified (it's per person, the same on each of their machines): a machine of theirs carries a
+    /// Reason sign-in proof for their name, good now.
+    #[serde(default)]
+    pub verified: bool,
+    /// This machine carries such a proof itself.
+    #[serde(default)]
+    pub has_proof: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamInfo {
+    /// The team's id, 32 hex digits (the Reason CLI and connector route by it).
+    #[serde(default, rename = "team_id")]
+    pub id: String,
     pub name: String,
+    /// `name` again, under the name `team --json` gives it.
+    #[serde(default)]
+    pub team_name: String,
     pub relay: Option<String>,
     /// Whether this machine is on its relay right now (`None` while the network isn't up).
     #[serde(default)]
@@ -323,6 +384,10 @@ pub struct TeamInfo {
     pub person: String,
     pub machine: String,
     pub machines: Vec<MachineInfo>,
+    /// What this engine takes beyond what every version does (`files`), for local clients that pass such things on
+    /// for others. Older engines leave it out.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,7 +403,7 @@ pub struct InviteInfo {
     /// Four words, like `plum-tiger-lake-orbit`. For a team with its own relay, the long form (a code would need n0's
     /// address lookup to find this machine).
     pub code: String,
-    /// The same invite as a long `tincan1…` string, for when the inviting machine will be offline.
+    /// The same invite as a long `rn1-…` string, for when the inviting machine will be offline.
     pub ticket: String,
     pub hours: u64,
 }
@@ -398,4 +463,48 @@ pub struct Inbox {
 pub struct Unread {
     pub count: u32,
     pub from: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_team_reply_names_the_team_by_id_and_name() {
+        let t = TeamInfo {
+            id: "00112233445566778899aabbccddeeff".into(),
+            name: "vibes".into(),
+            team_name: "vibes".into(),
+            relay: None,
+            relay_connected: None,
+            person: "alex".into(),
+            machine: "mbp".into(),
+            machines: vec![],
+            features: vec![],
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["team_id"], "00112233445566778899aabbccddeeff");
+        assert_eq!((v["team_name"].as_str(), v["name"].as_str()), (Some("vibes"), Some("vibes")));
+        // A reply from a daemon before these fields still reads.
+        let old: TeamInfo =
+            serde_json::from_value(serde_json::json!({"name": "vibes", "relay": null, "person": "alex",
+            "machine": "mbp", "machines": []}))
+            .unwrap();
+        assert_eq!((old.id.as_str(), old.name.as_str()), ("", "vibes"));
+    }
+
+    #[test]
+    fn error_replies_carry_a_code_the_reason_cli_acts_on() {
+        let reply = |m: &str| serde_json::to_value(Reply::err(7, anyhow::anyhow!(m.to_string()))).unwrap();
+        assert_eq!(
+            reply("'alex' is already in this team; join with another name (--as)"),
+            serde_json::json!({"id": 7, "ok": false, "error": "'alex' is already in this team; join with another name (--as)",
+                               "code": "name_taken"})
+        );
+        let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
+        assert_eq!(reply(same)["code"], "same_account_needs_owner");
+        // Anything else, and every success, has none.
+        assert_eq!(reply("this sign-in proof expired; sign in again").get("code"), None);
+        assert_eq!(serde_json::to_value(Reply::ok(7, serde_json::json!(1))).unwrap().get("code"), None);
+    }
 }

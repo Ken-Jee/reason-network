@@ -202,7 +202,11 @@ impl Daemon {
         let mut known = g.store.sessions().unwrap_or_default();
         known.retain(|r| !live.contains(r.name.as_str()));
         known.sort_by_key(|r| -r.last_seen);
-        Presence { sessions, known: known.into_iter().take(100).map(|r| r.name).collect() }
+        Presence {
+            sessions,
+            known: known.into_iter().take(100).map(|r| r.name).collect(),
+            features: vec![crate::files::FEATURE.into()],
+        }
     }
 
     pub(super) async fn who(
@@ -273,6 +277,7 @@ impl Daemon {
             machine: self.machine.clone(),
             machines,
             sessions: rows,
+            invite_line: self.current_link().map(|l| crate::invite_line(&l)),
         })
     }
 

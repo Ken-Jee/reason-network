@@ -5,7 +5,7 @@
 //! don't show them a second time.
 
 use super::{Daemon, Inner, directory::Target, log};
-use crate::{agent, claude, config::Policy, proto::*, render, team::Signed, util};
+use crate::{agent, claude, config::Policy, files, proto::*, render, team::Signed, util};
 use anyhow::{Result, anyhow, bail};
 use iroh::EndpointId;
 use std::{
@@ -64,6 +64,10 @@ impl Inner {
     }
 }
 
+/// A message to send to a teammate's machine now: where its result goes, the machine, its name, whether it is
+/// connected, and the message.
+type RemoteJob = (usize, EndpointId, String, bool, Message);
+
 const UPGRADE: &str =
     "update Reason Network (with the Reason CLI, `reason update`): messages go between agent sessions now";
 
@@ -81,6 +85,7 @@ impl Daemon {
         wake: bool,
         notify: bool,
         approval: Option<Box<Signed<Approval>>>,
+        files: Vec<Attachment>,
     ) -> Result<SendResult> {
         let (body, to) = (body.trim(), to.trim());
         if body.is_empty() {
@@ -90,12 +95,14 @@ impl Daemon {
             bail!("notify is for one session or one person, not a group");
         }
         if body.len() > MAX_BODY {
+            // A path means nothing on the recipient's computer.
             bail!(
-                "message is {} KB; the limit is {} KB (send a path or link instead)",
-                body.len() / 1024,
+                "message is {} KB; the limit is {} KB (send a small text file with `files`, or a link)",
+                body.len().div_ceil(1024),
                 MAX_BODY / 1024
             );
         }
+        let files = files::check(files)?;
         let now = util::now_ms();
         let net = self.net();
         let remotes = net.as_ref().map(|n| n.remotes()).unwrap_or_default();
@@ -123,6 +130,9 @@ impl Daemon {
             // Your own user, not a session: just the pop-up, on each of their machines that is on now. (To get a
             // teammate's attention, message one of their sessions with notify.)
             let own = notify && to == self.person;
+            if own && !files.is_empty() {
+                bail!("files go to a session: send them to one of {to}'s sessions");
+            }
             if own {
                 let msg = Message {
                     id: Ulid::new().to_string(),
@@ -137,6 +147,7 @@ impl Daemon {
                     notify: true,
                     sent_at: now,
                     approval: None,
+                    files: Vec::new(),
                 };
                 let (sent, note) = self.notify(&msg);
                 let state = if sent { "notified" } else { "not notified" };
@@ -158,7 +169,7 @@ impl Daemon {
             }
             let targets = if own { Vec::new() } else { self.resolve(&g, &remotes, to, Some(&exclude))? };
             for t in targets {
-                let msg = Message {
+                let mut msg = Message {
                     id: Ulid::new().to_string(),
                     from: from_addr.clone(),
                     from_agent: from_agent.clone(),
@@ -171,6 +182,7 @@ impl Daemon {
                     notify,
                     sent_at: now,
                     approval: approval.clone(),
+                    files: files.clone(),
                 };
                 res.ids.push(msg.id.clone());
                 let here = !matches!(t, Target::Remote { .. });
@@ -179,20 +191,22 @@ impl Daemon {
                         ("refused".into(), LOOP_NOTE.into())
                     }
                     Target::Session { key: Some(key), .. } => {
-                        g.store.insert(&msg, false)?;
+                        g.store.insert(&mut msg, false)?;
                         self.deliver(&mut g, &key, vec![msg.clone()], wake)
                     }
                     Target::Session { key: None, .. } => {
-                        g.store.insert(&msg, false)?;
+                        g.store.insert(&mut msg, false)?;
                         ("queued".into(), "queued: the session is offline; delivered when it is back".into())
                     }
-                    Target::Remote { machine, machine_name, online, .. } => {
-                        g.store.outbox_add(&machine.to_string(), &msg)?;
-                        remote_jobs.push((res.recipients.len(), machine, machine_name.clone(), online, msg.clone()));
-                        (
-                            "queued".into(),
-                            format!("queued: not connected to {machine_name} right now; it goes out as soon as it is"),
-                        )
+                    Target::Remote { machine, .. } => {
+                        let takes_files = remotes.get(&machine).is_some_and(|r| r.presence.has(files::FEATURE));
+                        match for_machine(msg.clone(), takes_files) {
+                            Ok(m) => {
+                                msg = m;
+                                self.queue_remote(&mut g, t, &msg, &mut remote_jobs, res.recipients.len())?
+                            }
+                            Err(note) => ("refused".into(), note),
+                        }
                     }
                 };
                 if notify && here && state != "refused" {
@@ -228,6 +242,22 @@ impl Daemon {
             }
         }
         Ok(res)
+    }
+
+    /// Puts a message for a teammate's machine in the outbox, and on the list to send now if it is connected.
+    fn queue_remote(
+        &self,
+        g: &mut Inner,
+        t: Target,
+        msg: &Message,
+        jobs: &mut Vec<RemoteJob>,
+        at: usize,
+    ) -> Result<(String, String)> {
+        let Target::Remote { machine, machine_name, online, .. } = t else { unreachable!("only remote targets") };
+        g.store.outbox_add(&machine.to_string(), msg)?;
+        let note = format!("queued: not connected to {machine_name} right now; it goes out as soon as it is");
+        jobs.push((at, machine, machine_name, online, msg.clone()));
+        Ok(("queued".into(), note))
     }
 
     /// Hands messages to a session here by the fastest way it has. Returns the state and a note for the sender.
@@ -471,6 +501,17 @@ impl Daemon {
             if g.store.has(&msg.id)? {
                 return Ok(("queued".into(), "already delivered".into()));
             }
+            // Files take room here: past the quota, the sender's machine keeps the message and tries again later.
+            let bytes = files::size(&msg.files);
+            if bytes > 0 {
+                let (kept, from_sender) = (g.store.files_kept()?, g.store.files_kept_from(&sender)?);
+                if let Err(why) = g.quota.admit(&sender, bytes, kept, from_sender, Instant::now()) {
+                    return Ok((
+                        "retry".into(),
+                        format!("queued: {} can't take these files now ({why}); retrying later", self.machine),
+                    ));
+                }
+            }
             if !g.loop_ok(&msg.from, &msg.to) {
                 return Ok(("refused".into(), LOOP_NOTE.into()));
             }
@@ -480,8 +521,9 @@ impl Daemon {
                 let note = format!("refused: agents message one of {}'s sessions, not a group", self.person);
                 return Ok(("refused".into(), note));
             }
+            // A held message's files are saved only once the person approves it.
             let held = policy == Policy::Hold;
-            g.store.insert(&msg, held)?;
+            g.store.insert(&mut msg, held)?;
             let (state, note) = match key {
                 _ if held => ("held".into(), format!("held until {} approves it", self.person)),
                 Some(key) => self.deliver(&mut g, &key, vec![msg.clone()], msg.wake),
@@ -550,7 +592,10 @@ impl Daemon {
     /// Approves or drops held messages. Approved ones go to their session now.
     pub(super) fn settle(self: &Arc<Self>, ids: &[String], release: bool) -> Result<usize> {
         let mut g = self.inner.lock().unwrap();
-        let msgs = g.store.settle_held(ids, release)?;
+        let (msgs, unsaved) = g.store.settle_held(ids, release)?;
+        for (id, why) in &unsaved {
+            log(&format!("held message {id} stays held: its files couldn't be saved ({why})"));
+        }
         if release {
             for m in &msgs {
                 let name = m.to.split_once('/').map_or("", |(_, n)| n);
@@ -616,7 +661,9 @@ fn clean(m: Message) -> Result<Message> {
     let ok = |s: &str, extra: &str| {
         !s.is_empty() && s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
     };
-    if !ok(&m.id, "") || !ok(&m.from, "-/") || !ok(&m.to, "-/") {
+    // Every engine names a message by a ULID, as written: one id, in one case.
+    let canonical = Ulid::from_string(&m.id).is_ok_and(|u| u.to_string() == m.id);
+    if !canonical || !ok(&m.from, "-/") || !ok(&m.to, "-/") {
         bail!("malformed message");
     }
     Ok(Message {
@@ -624,8 +671,24 @@ fn clean(m: Message) -> Result<Message> {
         from_repo: m.from_repo.as_deref().and_then(|s| tidy(s, "-_./", 100)),
         via: m.via.as_deref().and_then(|s| tidy(s, "-_./:*@", 100)),
         reply_to: m.reply_to.as_deref().and_then(|s| tidy(s, "", 40)),
+        files: files::check(m.files)?,
         ..m
     })
+}
+
+/// A message as it goes to a teammate's machine. One whose engine doesn't take files (its presence doesn't say so)
+/// would drop them without a word: they are written out in the text instead, if that fits, and otherwise it isn't sent.
+fn for_machine(mut msg: Message, takes_files: bool) -> Result<Message, String> {
+    if msg.files.is_empty() || takes_files {
+        return Ok(msg);
+    }
+    match files::inline(&msg.body, &msg.files, &msg.to, MAX_BODY) {
+        Some(body) => {
+            (msg.body, msg.files) = (body, Vec::new());
+            Ok(msg)
+        }
+        None => Err(format!("{} needs to update Reason Network to receive files", msg.to)),
+    }
 }
 
 /// Runs futures concurrently and collects their outputs in order.
@@ -648,6 +711,31 @@ where
 mod tests {
     use super::*;
     use iroh::SecretKey;
+    use serde::Deserialize;
+
+    #[test]
+    fn a_peers_message_id_is_a_ulid_as_written() {
+        let msg = |id: &str| Message {
+            id: id.into(),
+            from: "bob/api".into(),
+            from_agent: None,
+            from_repo: None,
+            to: "alex/web".into(),
+            via: None,
+            reply_to: None,
+            body: "hi".into(),
+            wake: true,
+            notify: false,
+            sent_at: 0,
+            approval: None,
+            files: Vec::new(),
+        };
+        let id = Ulid::new().to_string();
+        assert!(clean(msg(&id)).is_ok());
+        for bad in [id.to_lowercase(), "CON".into(), "01ALICEMSG".into(), format!("{id}0"), String::new()] {
+            assert!(clean(msg(&bad)).is_err(), "{bad}");
+        }
+    }
 
     fn approval(asker: &str, approver: &str) -> Approval {
         Approval {
@@ -685,5 +773,45 @@ mod tests {
         big.note = "x".repeat(3000);
         let big = Signed::new(big, &bob, "acme", "approval");
         assert!(!approval_holds(&big, "acme", &bob.public(), "bob", "alice/api"));
+    }
+
+    #[test]
+    fn an_older_engine_gets_the_files_in_the_text_or_nothing() {
+        let msg = |content: &str| Message {
+            id: "01M".into(),
+            from: "alex/web".into(),
+            from_agent: None,
+            from_repo: None,
+            to: "bob/api".into(),
+            via: None,
+            reply_to: None,
+            body: "the config".into(),
+            wake: true,
+            notify: false,
+            sent_at: 0,
+            approval: None,
+            files: vec![Attachment { name: "app.toml".into(), content: content.into(), path: None }],
+        };
+        // An engine that takes files gets them as they are.
+        assert_eq!(for_machine(msg("port = 1"), true).unwrap().files.len(), 1);
+        // One that doesn't: written out in the text, as nothing it doesn't know would be dropped.
+        let sent = for_machine(msg("port = 1"), false).unwrap();
+        assert!(sent.files.is_empty());
+        assert!(sent.body.starts_with("the config\n\n(bob/api runs an older Reason Network"), "{}", sent.body);
+        assert!(sent.body.ends_with("app.toml:\n```\nport = 1\n```"), "{}", sent.body);
+        // Too much to write out: not sent, and the sender is told why.
+        let e = for_machine(msg(&"x".repeat(MAX_BODY)), false).unwrap_err();
+        assert_eq!(e, "bob/api needs to update Reason Network to receive files");
+        // Nothing to carry: as it is.
+        let mut plain = msg("");
+        plain.files.clear();
+        assert_eq!(for_machine(plain, false).unwrap().body, "the config");
+        // What an older engine reads of a message with files: the message, without them (hence the above).
+        #[derive(Deserialize)]
+        struct Older {
+            body: String,
+        }
+        let wire = serde_json::to_string(&msg("port = 1")).unwrap();
+        assert_eq!(serde_json::from_str::<Older>(&wire).unwrap().body, "the config");
     }
 }

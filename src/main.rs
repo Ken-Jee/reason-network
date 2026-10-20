@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod daemon;
 mod doing;
+mod files;
 mod git;
 mod hook;
 mod invite;
@@ -12,6 +13,7 @@ mod mcp;
 mod migrate;
 mod net;
 mod paths;
+mod proof;
 mod proto;
 mod render;
 mod setup;
@@ -101,6 +103,11 @@ pub fn join_url(ticket: &str) -> String {
     format!("{SITE_URL}/join/#{ticket}")
 }
 
+/// The invite line: what a person pastes to their agent to join the team.
+pub fn invite_line(link: &str) -> String {
+    format!("Join the Reason Network: {link}")
+}
+
 #[derive(Parser)]
 #[command(
     name = "reason-network",
@@ -143,6 +150,9 @@ enum Cmd {
         /// Send as this agent session here (e.g. one made with `listen --as <name>`)
         #[arg(long)]
         from: Option<String>,
+        /// A text file to send with it (repeat for more): at most 10, 256 KB each, 512 KB in all
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<String>,
     },
     /// Set what the current agent session is doing (run from inside the agent's shell)
     Status {
@@ -162,6 +172,12 @@ enum Cmd {
         /// Your own iroh relay, from the start (see `relay`)
         #[arg(long)]
         relay: Option<String>,
+        /// This machine's Reason sign-in proof: your name is then the one it gives
+        #[arg(long)]
+        proof: Option<String>,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show the team link to send friends (or, with --me / --code, a one-time code)
     Invite {
@@ -180,6 +196,8 @@ enum Cmd {
         /// Replace it: the old link stops working
         #[arg(long)]
         new: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Join a team with a team link (or an invite code)
     Join {
@@ -189,9 +207,22 @@ enum Cmd {
         person: Option<String>,
         #[arg(long)]
         no_setup: bool,
+        /// This machine's Reason sign-in proof: your name is then the one it gives
+        #[arg(long)]
+        proof: Option<String>,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show the team's people and machines, and how each is reached
-    Team,
+    Team {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach or refresh this machine's Reason sign-in proof, which verifies your name to teammates
+    Proof { jws: String },
+    /// Print this machine's endpoint id (what a sign-in proof names)
+    Endpoint,
     /// Remove a person (all their machines) or one machine from the team
     Remove { who: String },
     /// Leave the team on this machine
@@ -200,7 +231,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Use your own iroh relay for the team, so its machines never contact n0 (or `default` for n0's public relays)
+    /// Use your own iroh relay for the team, so its machines never contact n0 (or `default` for Reason's relay)
     Relay { url: String },
     /// List messages waiting for your approval (when `inbound` is `hold`)
     Held,
@@ -279,12 +310,27 @@ async fn main() -> Result<()> {
         Some(Cmd::Mcp) => mcp::run().await,
         // Blocks this (the main) thread with AppKit's event loop; its daemon calls run on the runtime's workers.
         Some(Cmd::Tray) => tray::run(),
+        Some(Cmd::Endpoint) => {
+            paths::ensure_home()?;
+            println!("{}", daemon::load_key()?.public());
+            Ok(())
+        }
         Some(Cmd::Hook { agent, event, session, state, doing }) => {
             hook::run(&agent, &event, session, state, doing).await;
             // Don't wait on anything left behind (a stuck stdin read): the agent is waiting on us.
             std::process::exit(0)
         }
-        Some(cmd) => cli(cmd).await,
+        Some(cmd) => {
+            // With --json, every failure is JSON too.
+            let json = matches!(
+                cmd,
+                Cmd::Init { json: true, .. }
+                    | Cmd::Join { json: true, .. }
+                    | Cmd::Link { json: true, .. }
+                    | Cmd::Team { json: true }
+            );
+            cli(cmd).await.or_else(|e| json_error(json, e))
+        }
         // `reason network` alone: get set up if needed, else show who's around.
         None => {
             let in_team = Link::new(None).call::<TeamInfo>(Request::Team).await.is_ok();
@@ -346,7 +392,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 print!("{}", render::directory(&d, false, render::Paint::terminal()));
             }
         }
-        Cmd::Send { to, message, reply_to, fyi, notify, from } => {
+        Cmd::Send { to, message, reply_to, fyi, notify, from, files } => {
             let mut body = message.join(" ");
             if message.is_empty() || body == "-" {
                 body.clear();
@@ -355,6 +401,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             if body.trim().is_empty() {
                 bail!("empty message");
             }
+            let files = files::read(&files, &std::env::current_dir()?)?;
             // Messages come from agent sessions: `--from`'s, this agent's, or from a plain terminal, `<you>/terminal`.
             // An agent shell Reason Network doesn't know (its tools aren't loaded) counts as a terminal.
             let send = |from: String| Request::Send {
@@ -364,6 +411,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 reply_to: reply_to.clone(),
                 wake: !fyi,
                 notify,
+                files: files.clone(),
             };
             // As the terminal, a group send has to come from a person sitting at it, not an agent's shell or a script.
             let as_terminal = || {
@@ -398,46 +446,61 @@ async fn cli(cmd: Cmd) -> Result<()> {
             let r: Registered = link.call(Request::SetStatus { key, doing, name }).await?;
             println!("You are {}.", r.address);
         }
-        Cmd::Init { team, person, no_setup, relay: None } if !no_setup && wizard::interactive() => {
+        Cmd::Init { team, person, no_setup: false, relay: None, proof: None, json: false } if wizard::interactive() => {
             wizard::guided(wizard::onboard(Some(true), team, None, person)).await?
         }
-        Cmd::Join { invite, person, no_setup } if !no_setup && wizard::interactive() => {
+        Cmd::Join { invite, person, no_setup: false, proof: None, json: false } if wizard::interactive() => {
             wizard::guided(wizard::onboard(Some(false), None, invite, person)).await?
         }
         Cmd::Invite { me: false, code: false, .. } if wizard::interactive() => wizard::guided(wizard::invite()).await?,
-        Cmd::Link { new } => {
+        Cmd::Link { new, json } => {
             let l: LinkInfo = link.call(Request::Link { new }).await?;
-            let copied = wizard::interactive() && wizard::copy(&l.url);
-            println!("Team link for {}{}:\n\n{}\n", l.team, if copied { " (on your clipboard)" } else { "" }, l.url);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&team_json(&link, None).await?)?);
+                return Ok(());
+            }
+            let line = invite_line(&l.url);
+            let copied = wizard::interactive() && wizard::copy(&line);
+            println!("Team link for {}{}:\n\n{line}\n", l.team, if copied { " (on your clipboard)" } else { "" });
             println!("Anyone with it can join: it opens a page with one command. `{CLI} link --new` replaces it.");
             if managed() {
                 println!("Teammates in your Reason workspace just run `reason network`; the link is for anyone else.");
             }
         }
-        Cmd::Invite { me: false, code: false, .. } => Box::pin(cli(Cmd::Link { new: false })).await?,
+        Cmd::Invite { me: false, code: false, .. } => Box::pin(cli(Cmd::Link { new: false, json: false })).await?,
         Cmd::Setup { dry_run: false, remove: false, no_service: false } if wizard::interactive() => {
             wizard::guided(wizard::setup_agents()).await?
         }
-        Cmd::Init { team, person, no_setup, relay } => {
+        Cmd::Init { team, person, no_setup, relay, proof, json } => {
             let Some(team) = team else {
                 bail!("name the team: `{CLI} init <team>` (or run it in a terminal to be asked)")
             };
-            let t: TeamInfo =
-                link.call(Request::CreateTeam { name: team, person: default_person(person), relay }).await?;
+            let req = Request::CreateTeam { name: team, person: default_person(person), relay, proof };
+            let t: TeamInfo = link.call(req).await?;
             wait_exit(daemon_pid()).await;
+            if json {
+                let agents = if no_setup { None } else { Some(setup::quietly().await?) };
+                println!("{}", serde_json::to_string_pretty(&team_json(&Link::new(None), agents).await?)?);
+                return Ok(());
+            }
             println!("Created team {}. You are {} on {}.", t.name, t.person, t.machine);
             if !no_setup {
                 println!();
                 setup::run(false, false, false).await?;
             }
-            println!("\nNext: `{CLI} link` prints the team link to send your teammates.");
+            let l: LinkInfo = Link::new(None).call(Request::Link { new: false }).await?;
+            println!("\nInvite people with this line:\n{}", invite_line(&l.url));
         }
-        Cmd::Join { invite, person, no_setup } => {
+        Cmd::Join { invite, person, no_setup, proof, json } => {
             let Some(invite) = invite else { bail!("give the invite code: `{CLI} join <code>`") };
-            let t: TeamInfo = link.call(Request::Join { ticket: invite, person: default_person(person) }).await?;
+            let req = Request::Join { ticket: invite, person: default_person(person), proof };
+            let t: TeamInfo = link.call(req).await?;
             wait_exit(daemon_pid()).await;
-            println!("Joined team {} as {} on {}.", t.name, t.person, t.machine);
-            if !no_setup {
+            let agents = if no_setup || !json { None } else { Some(setup::quietly().await?) };
+            if !json {
+                println!("Joined team {} as {} on {}.", t.name, t.person, t.machine);
+            }
+            if !no_setup && !json {
                 println!();
                 setup::run(false, false, false).await?;
             }
@@ -451,8 +514,15 @@ async fn cli(cmd: Cmd) -> Result<()> {
                     break;
                 }
             }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&team_json(&fresh, agents).await?)?);
+                return Ok(());
+            }
             if let Ok(t) = fresh.call::<TeamInfo>(Request::Team).await {
                 print!("\n{}", render::team(&t));
+            }
+            if let Ok(l) = fresh.call::<LinkInfo>(Request::Link { new: false }).await {
+                println!("\nInvite people with this line:\n{}", invite_line(&l.url));
             }
         }
         Cmd::Invite { me, hours, .. } => {
@@ -499,10 +569,12 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 let _ = cli_session(&link, &id, "prompt").await;
             }
         }
-        Cmd::Team => {
+        Cmd::Team { json: true } => println!("{}", serde_json::to_string_pretty(&team_json(&link, None).await?)?),
+        Cmd::Team { json: false } => {
             let t: TeamInfo = link.call(Request::Team).await?;
             print!("{}", render::team(&t));
         }
+        Cmd::Proof { jws } => println!("{}", link.call::<String>(Request::Proof { jws }).await?),
         Cmd::Remove { who } => println!("{}", link.call::<String>(Request::Remove { who }).await?),
         Cmd::Leave { force } => {
             println!("{}", link.call::<String>(Request::Leave { force }).await?);
@@ -556,9 +628,62 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 println!("The daemon is not running.");
             }
         }
-        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Hook { .. } | Cmd::Tray => unreachable!("handled in main"),
+        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Hook { .. } | Cmd::Tray | Cmd::Endpoint => {
+            unreachable!("handled in main")
+        }
     }
     Ok(())
+}
+
+/// The team as `--json` gives it, for the Reason CLI: `set_up_for` names the agents set up, when setup ran.
+async fn team_json(link: &std::sync::Arc<Link>, set_up_for: Option<Vec<&str>>) -> Result<serde_json::Value> {
+    let t: TeamInfo = link.call(Request::Team).await?;
+    let l: LinkInfo = link.call(Request::Link { new: false }).await?;
+    team_value(&t, &l, set_up_for)
+}
+
+fn team_value(t: &TeamInfo, l: &LinkInfo, set_up_for: Option<Vec<&str>>) -> Result<serde_json::Value> {
+    // A daemon from before team ids were in its reply (it was running when this binary was updated).
+    if t.id.is_empty() {
+        bail!(
+            "the Reason Network daemon running is older than this command: restart the Reason Network daemon (`{CLI} stop`)"
+        );
+    }
+    let endpoint = t.machines.iter().find(|m| m.is_me).map(|m| m.endpoint.clone()).unwrap_or_default();
+    let members: Vec<_> = t
+        .machines
+        .iter()
+        .map(|m| {
+            serde_json::json!({"person": m.person, "machine": m.machine, "endpoint": m.endpoint,
+                               "verified": m.verified, "has_proof": m.has_proof, "is_me": m.is_me,
+                               "online": m.is_me || m.online})
+        })
+        .collect();
+    let mut out = serde_json::json!({
+        "team_id": t.id, "team_name": t.name, "link": l.url, "invite_line": invite_line(&l.url),
+        "person": t.person, "machine": t.machine, "endpoint": endpoint, "members": members,
+    });
+    if let Some(agents) = set_up_for {
+        out["set_up_for"] = serde_json::json!(agents);
+    }
+    Ok(out)
+}
+
+/// With `--json`, a failure is a JSON object on stdout too (see `json_failure`).
+fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
+    if !json {
+        return Err(e);
+    }
+    println!("{}", json_failure(&e));
+    std::process::exit(1)
+}
+
+/// `{"error":"same_account_needs_owner"}` when one of the person's own computers should let this one in,
+/// `{"error":"name_taken"}` when the name is someone else's in the team (the Reason CLI then asks for another), else the
+/// message.
+fn json_failure(e: &anyhow::Error) -> serde_json::Value {
+    let msg = format!("{e:#}");
+    serde_json::json!({ "error": proto::error_code(&msg).unwrap_or(&msg) })
 }
 
 /// The running daemon's pid, from its lock file.
@@ -587,4 +712,65 @@ pub async fn stop_daemon() -> bool {
     let _ = Link::existing().call::<serde_json::Value>(Request::Shutdown).await;
     wait_exit(pid).await;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_failures_name_the_cases_the_reason_cli_handles() {
+        let e = |m: &str| json_failure(&anyhow::anyhow!(m.to_string()));
+        assert_eq!(
+            e("'alex' is already in this team; join with another name (--as)"),
+            serde_json::json!({"error": "name_taken"})
+        );
+        let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
+        assert_eq!(e(same), serde_json::json!({"error": "same_account_needs_owner"}));
+        assert_eq!(
+            e("this sign-in proof expired; sign in again"),
+            serde_json::json!({"error": "this sign-in proof expired; sign in again"})
+        );
+    }
+
+    #[test]
+    fn team_json_needs_a_daemon_that_gives_the_team_id() {
+        let me = MachineInfo {
+            person: "alex".into(),
+            machine: "mbp".into(),
+            endpoint: "ab".repeat(32),
+            is_me: true,
+            online: true,
+            link: None,
+            rtt_ms: None,
+            last_seen: None,
+            verified: true,
+            has_proof: true,
+        };
+        let mut t = TeamInfo {
+            id: String::new(),
+            name: "vibes".into(),
+            team_name: "vibes".into(),
+            relay: None,
+            relay_connected: None,
+            person: "alex".into(),
+            machine: "mbp".into(),
+            machines: vec![me],
+            features: vec![],
+        };
+        let l = LinkInfo { team: "vibes".into(), url: join_url("rn1-AAAA"), ticket: "rn1-AAAA".into() };
+        assert!(team_value(&t, &l, None).unwrap_err().to_string().contains("restart the Reason Network daemon"));
+        t.id = "00112233445566778899aabbccddeeff".into();
+        let v = team_value(&t, &l, Some(vec!["Claude Code"])).unwrap();
+        assert_eq!(
+            (v["team_id"].as_str(), v["team_name"].as_str()),
+            (Some("00112233445566778899aabbccddeeff"), Some("vibes"))
+        );
+        assert_eq!(v["invite_line"], "Join the Reason Network: https://reasonmachines.com/network/join/#rn1-AAAA");
+        assert_eq!(
+            (v["members"][0]["verified"].as_bool(), v["members"][0]["has_proof"].as_bool()),
+            (Some(true), Some(true))
+        );
+        assert_eq!(v["set_up_for"], serde_json::json!(["Claude Code"]));
+    }
 }

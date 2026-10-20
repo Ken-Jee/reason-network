@@ -1,14 +1,36 @@
 //! SQLite: messages, and the sessions this machine has seen: live ones, ones gone for less than a day, and the
-//! person's own mailboxes (`cli`, such as `terminal`).
+//! person's own mailboxes (`cli`, such as `terminal`). Files that came with messages are saved in the inbox folder, one
+//! folder per message, and go with their message.
 
-use crate::proto::{Message, Tier};
+use crate::{
+    files,
+    proto::{Attachment, Message, Tier},
+};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use std::{collections::HashSet, path::Path};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 pub struct Store {
     db: Connection,
+    inbox: PathBuf,
 }
+
+/// What the `files` column keeps of a message's files: their folder in the inbox folder, named by an id made here
+/// (never the sender's message id, which a teammate could pick to name another's folder, in another case, or a device
+/// name), their size, and their names as saved (and their text while the message is held).
+#[derive(Serialize, Deserialize)]
+struct Kept {
+    dir: String,
+    bytes: usize,
+    files: Vec<Attachment>,
+}
+
+/// A held message that can't be approved now, and why (it stays held).
+pub type Unsaved = (String, String);
 
 #[derive(Debug, Clone)]
 pub struct Remembered {
@@ -65,25 +87,60 @@ CREATE INDEX IF NOT EXISTS sessions_key ON sessions (key);
 ";
 
 const MESSAGE_COLS: &str =
-    "id, sender, sender_agent, sender_repo, recipient, via, reply_to, body, wake, sent_at, approval";
+    "id, sender, sender_agent, sender_repo, recipient, via, reply_to, body, wake, sent_at, approval, files";
 const SESSION_COLS: &str = "name, key, agent, cwd, repo, branch, doing, tier, last_seen";
 
 impl Store {
-    pub fn open(path: &Path) -> Result<Self> {
+    /// The database at `path`, and the folder `inbox` that messages' files are saved in.
+    pub fn open(path: &Path, inbox: PathBuf) -> Result<Self> {
         let db = Connection::open(path)?;
         db.execute_batch(SCHEMA)?;
         // Added in 0.10.7.
         if !db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'approval'")?.exists([])? {
             db.execute("ALTER TABLE messages ADD COLUMN approval TEXT", [])?;
         }
-        Ok(Store { db })
+        // Added with files: their names, and their text while the message is held (once saved, it is in the inbox
+        // folder instead).
+        if !db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'files'")?.exists([])? {
+            db.execute("ALTER TABLE messages ADD COLUMN files TEXT", [])?;
+        }
+        Ok(Store { db, inbox })
     }
 
-    /// Stores a message; false if one with this id is already here (a retried delivery).
-    pub fn insert(&self, m: &Message, held: bool) -> Result<bool> {
+    /// A folder named in the `files` column: only one of the ids made here (a ULID), so always just inside the inbox.
+    fn dir(&self, kept: &Kept) -> Option<PathBuf> {
+        ulid::Ulid::from_string(&kept.dir)
+            .ok()
+            .filter(|u| u.to_string() == kept.dir)
+            .map(|_| self.inbox.join(&kept.dir))
+    }
+
+    fn kept(&self, id: &str) -> Result<Option<Kept>> {
+        let col: Option<Option<String>> =
+            self.db.query_row("SELECT files FROM messages WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(col.flatten().and_then(|c| serde_json::from_str(&c).ok()))
+    }
+
+    /// Stores a message; false if one with this id is already here (a retried delivery). Unless it is held, its files
+    /// are saved in a new folder of their own first, and `m` then lists them by path.
+    pub fn insert(&self, m: &mut Message, held: bool) -> Result<bool> {
+        if self.has(&m.id)? {
+            return Ok(false);
+        }
+        let mut kept = (!m.files.is_empty()).then(|| Kept {
+            dir: ulid::Ulid::new().to_string(),
+            bytes: files::size(&m.files),
+            files: m.files.iter().map(|f| Attachment { path: None, ..f.clone() }).collect(),
+        });
+        let mut saved = None;
+        if let Some(k) = kept.as_mut().filter(|_| !held) {
+            let dir = self.inbox.join(&k.dir);
+            k.files = files::save(&dir, &k.files)?;
+            saved = Some(dir);
+        }
         let n = self.db.execute(
             &format!(
-                "INSERT OR IGNORE INTO messages ({MESSAGE_COLS}, held) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                "INSERT OR IGNORE INTO messages ({MESSAGE_COLS}, held) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ),
             params![
                 m.id,
@@ -97,15 +154,28 @@ impl Store {
                 m.wake,
                 m.sent_at,
                 m.approval.as_ref().map(|a| serde_json::to_string(a).expect("approvals serialize")),
+                kept.as_ref().map(|k| serde_json::to_string(k).expect("files serialize")),
                 held
             ],
-        )?;
-        Ok(n == 1)
+        );
+        match (n, saved, kept) {
+            (Ok(n), Some(dir), Some(k)) => {
+                m.files = files::located(&dir, &k.files);
+                Ok(n == 1)
+            }
+            (Ok(n), ..) => Ok(n == 1),
+            (Err(e), dir, _) => {
+                if let Some(dir) = dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                Err(e.into())
+            }
+        }
     }
 
     pub fn message(&self, id: &str) -> Result<Option<Message>> {
-        let sql = format!("SELECT {MESSAGE_COLS} FROM messages WHERE id = ?1");
-        Ok(self.db.query_row(&sql, [id], message).optional()?)
+        let sql = format!("SELECT {MESSAGE_COLS}, held FROM messages WHERE id = ?1");
+        Ok(self.db.query_row(&sql, [id], |r| self.row(r)).optional()?)
     }
 
     pub fn has(&self, id: &str) -> Result<bool> {
@@ -114,9 +184,9 @@ impl Store {
 
     pub fn unread(&self, recipient: &str) -> Result<Vec<Message>> {
         let mut st = self.db.prepare_cached(&format!(
-            "SELECT {MESSAGE_COLS} FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0 ORDER BY sent_at, id"
+            "SELECT {MESSAGE_COLS}, held FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0 ORDER BY sent_at, id"
         ))?;
-        let rows = st.query_map([recipient], message)?;
+        let rows = st.query_map([recipient], |r| self.row(r))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -129,24 +199,102 @@ impl Store {
     }
 
     pub fn held(&self) -> Result<Vec<Message>> {
-        let mut st = self
-            .db
-            .prepare_cached(&format!("SELECT {MESSAGE_COLS} FROM messages WHERE held = 1 ORDER BY sent_at, id"))?;
-        let rows = st.query_map([], message)?;
+        let mut st = self.db.prepare_cached(&format!(
+            "SELECT {MESSAGE_COLS}, held FROM messages WHERE held = 1 ORDER BY sent_at, id"
+        ))?;
+        let rows = st.query_map([], |r| self.row(r))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Approves (`release`) or drops held messages; returns the ones affected.
-    pub fn settle_held(&self, ids: &[String], release: bool) -> Result<Vec<Message>> {
+    /// The bytes of teammates' files this machine keeps: saved, or held for approval.
+    pub fn files_kept(&self) -> Result<usize> {
+        let sql = "SELECT COALESCE(SUM(json_extract(files, '$.bytes')), 0) FROM messages WHERE files IS NOT NULL";
+        Ok(self.db.query_row(sql, [], |r| r.get::<_, i64>(0))?.max(0) as usize)
+    }
+
+    /// The same, of files from `person`'s sessions.
+    pub fn files_kept_from(&self, person: &str) -> Result<usize> {
+        let sql = "SELECT COALESCE(SUM(json_extract(files, '$.bytes')), 0) FROM messages
+                   WHERE files IS NOT NULL AND substr(sender, 1, length(?1) + 1) = ?1 || '/'";
+        Ok(self.db.query_row(sql, [person], |r| r.get::<_, i64>(0))?.max(0) as usize)
+    }
+
+    /// Lets files go: a day after their message was read, a week after they came while it is unread (the message stays,
+    /// without them), and a message held a week with files goes altogether. Then deletes every folder in the inbox
+    /// folder that no kept message names.
+    pub fn sweep_files(&self, now: i64) -> Result<()> {
+        let mut st = self.db.prepare("SELECT id, files, read_at, held FROM messages WHERE files IS NOT NULL")?;
+        let rows: Vec<(String, String, Option<i64>, bool)> =
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+        let mut keep = HashSet::new();
+        for (id, col, read_at, held) in rows {
+            let kept: Option<Kept> = serde_json::from_str(&col).ok();
+            let came =
+                kept.as_ref().and_then(|k| ulid::Ulid::from_string(&k.dir).ok()).map(|u| u.timestamp_ms() as i64);
+            let fresh = came.is_some_and(|t| t > now - files::KEEP_UNREAD_MS);
+            if held {
+                if !fresh {
+                    self.db.execute("DELETE FROM messages WHERE id = ?1", [&id])?;
+                }
+            } else if (read_at.is_none() && fresh) || read_at.is_some_and(|t| t > now - files::KEEP_MS) {
+                if let Some(k) = &kept {
+                    keep.insert(k.dir.clone());
+                }
+            } else {
+                self.db.execute("UPDATE messages SET files = NULL WHERE id = ?1", [&id])?;
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&self.inbox) {
+            for e in entries.flatten() {
+                if !keep.contains(&*e.file_name().to_string_lossy()) {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Approves (`release`) or drops held messages; returns the ones affected, and those whose files couldn't be saved
+    /// (which stay held). An approved message's files are saved now; a dropped one's never are.
+    pub fn settle_held(&self, ids: &[String], release: bool) -> Result<(Vec<Message>, Vec<Unsaved>)> {
         let held = self.held()?;
         let picked: Vec<Message> = held.into_iter().filter(|m| ids.is_empty() || ids.contains(&m.id)).collect();
-        let sql =
-            if release { "UPDATE messages SET held = 0 WHERE id = ?1" } else { "DELETE FROM messages WHERE id = ?1" };
-        let mut st = self.db.prepare_cached(sql)?;
-        for m in &picked {
-            st.execute([&m.id])?;
+        let (mut done, mut unsaved) = (Vec::new(), Vec::new());
+        for mut m in picked {
+            if !release {
+                self.db.execute("DELETE FROM messages WHERE id = ?1", [&m.id])?;
+                done.push(m);
+                continue;
+            }
+            let mut col = None;
+            let mut saved = None;
+            if let Some(mut k) = self.kept(&m.id)? {
+                let Some(dir) = self.dir(&k) else {
+                    unsaved.push((m.id.clone(), "its files' record is damaged".into()));
+                    continue;
+                };
+                match files::save(&dir, &k.files) {
+                    Ok(names) => k.files = names,
+                    Err(e) => {
+                        unsaved.push((m.id.clone(), format!("{e:#}")));
+                        continue;
+                    }
+                }
+                m.files = files::located(&dir, &k.files);
+                col = Some(serde_json::to_string(&k).expect("files serialize"));
+                saved = Some(dir);
+            }
+            if let Err(e) =
+                self.db.execute("UPDATE messages SET held = 0, files = ?2 WHERE id = ?1", params![m.id, col])
+            {
+                if let Some(dir) = saved {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                return Err(e.into());
+            }
+            done.push(m);
         }
-        Ok(picked)
+        Ok((done, unsaved))
     }
 
     pub fn outbox_add(&self, target: &str, m: &Message) -> Result<()> {
@@ -233,10 +381,16 @@ impl Store {
         let mut st = self.db.prepare_cached("SELECT name FROM sessions WHERE last_seen < ?1 AND agent != 'cli'")?;
         let gone: Vec<String> = st.query_map([before], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         for name in gone.iter().filter(|n| !live.contains(n.as_str())) {
-            self.db.execute(
-                "DELETE FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0",
-                [format!("{person}/{name}")],
-            )?;
+            let unread = "FROM messages WHERE recipient = ?1 AND read_at IS NULL AND held = 0";
+            let to = format!("{person}/{name}");
+            let mut cols = self.db.prepare_cached(&format!("SELECT files {unread} AND files IS NOT NULL"))?;
+            let cols: Vec<String> = cols.query_map([&to], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            self.db.execute(&format!("DELETE {unread}"), [&to])?;
+            for kept in cols.iter().filter_map(|c| serde_json::from_str::<Kept>(c).ok()) {
+                if let Some(dir) = self.dir(&kept) {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
             self.db.execute("DELETE FROM sessions WHERE name = ?1", [name])?;
         }
         Ok(())
@@ -259,6 +413,19 @@ impl Store {
     }
 }
 
+impl Store {
+    fn row(&self, r: &Row) -> rusqlite::Result<Message> {
+        let kept: Option<Kept> = r.get::<_, Option<String>>(11)?.and_then(|f| serde_json::from_str(&f).ok());
+        // A held message's files aren't saved yet: their text is here. Once released, they are in their folder.
+        let files = match kept {
+            Some(k) if r.get::<_, bool>(12)? => k.files,
+            Some(k) => self.dir(&k).map(|dir| files::located(&dir, &k.files)).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        message(r).map(|m| Message { files, ..m })
+    }
+}
+
 fn message(r: &Row) -> rusqlite::Result<Message> {
     Ok(Message {
         id: r.get(0)?,
@@ -273,6 +440,7 @@ fn message(r: &Row) -> rusqlite::Result<Message> {
         notify: false,
         sent_at: r.get(9)?,
         approval: r.get::<_, Option<String>>(10)?.and_then(|a| serde_json::from_str(&a).ok()),
+        files: Vec::new(),
     })
 }
 
@@ -293,11 +461,13 @@ fn remembered(r: &Row) -> rusqlite::Result<Remembered> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util;
+    use std::collections::HashMap;
 
     #[test]
     fn a_session_gone_a_day_is_forgotten_with_the_mail_it_never_read() {
         // (Not one that is live, nor the person's own mailbox, nor mail held for the person.)
-        let store = Store::open(Path::new(":memory:")).unwrap();
+        let store = Store::open(Path::new(":memory:"), temp_inbox()).unwrap();
         let day = 86_400_000;
         let session = |name: &str, agent: &str, last_seen: i64| Remembered {
             name: name.into(),
@@ -331,11 +501,12 @@ mod tests {
             notify: false,
             sent_at: 0,
             approval: None,
+            files: Vec::new(),
         };
-        store.insert(&to("1", "gone"), false).unwrap();
-        store.insert(&to("2", "recent"), false).unwrap();
-        store.insert(&to("3", "terminal"), false).unwrap();
-        store.insert(&to("4", "gone"), true).unwrap();
+        store.insert(&mut to("1", "gone"), false).unwrap();
+        store.insert(&mut to("2", "recent"), false).unwrap();
+        store.insert(&mut to("3", "terminal"), false).unwrap();
+        store.insert(&mut to("4", "gone"), true).unwrap();
         store.forget_sessions(day + 1, &HashSet::from(["still-up"]), "lars").unwrap();
         let names: Vec<String> = store.sessions().unwrap().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["recent", "still-up", "terminal"]);
@@ -343,5 +514,209 @@ mod tests {
         assert_eq!(store.unread_count("lars/recent").unwrap(), 1);
         assert_eq!(store.unread_count("lars/terminal").unwrap(), 1);
         assert_eq!(store.held().unwrap().len(), 1);
+    }
+
+    fn temp_inbox() -> PathBuf {
+        std::env::temp_dir().join(format!("reason-network-inbox-{}", ulid::Ulid::new()))
+    }
+
+    fn file(name: &str, content: &str) -> Attachment {
+        Attachment { name: name.into(), content: content.into(), path: None }
+    }
+
+    fn with_files(id: &str, to: &str) -> Message {
+        Message {
+            id: id.into(),
+            from: "sven/claude".into(),
+            from_agent: None,
+            from_repo: None,
+            to: to.into(),
+            via: None,
+            reply_to: None,
+            body: "see the files".into(),
+            wake: true,
+            notify: false,
+            sent_at: 0,
+            approval: None,
+            files: vec![file("notes.md", "# notes\n"), file("run.log", "ok\n")],
+        }
+    }
+
+    /// The folder a stored message's files are in (from the path it lists).
+    fn folder(m: &Message) -> PathBuf {
+        PathBuf::from(m.files[0].path.as_ref().expect("saved")).parent().unwrap().to_path_buf()
+    }
+
+    /// The files in a folder: name, text, and whether anyone may execute it.
+    fn saved(dir: &Path) -> Vec<(String, String, bool)> {
+        let mut out: Vec<(String, String, bool)> = std::fs::read_dir(dir)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| {
+                        #[cfg(unix)]
+                        let exec =
+                            std::os::unix::fs::PermissionsExt::mode(&e.metadata().unwrap().permissions()) & 0o111 != 0;
+                        #[cfg(not(unix))]
+                        let exec = false;
+                        (e.file_name().to_string_lossy().into_owned(), std::fs::read_to_string(e.path()).unwrap(), exec)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn folders(inbox: &Path) -> HashSet<String> {
+        std::fs::read_dir(inbox)
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default()
+    }
+
+    fn stored_text(store: &Store, id: &str) -> Option<String> {
+        store.db.query_row("SELECT files FROM messages WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn files_are_saved_in_a_folder_named_here_and_kept_out_of_the_database() {
+        let inbox = temp_inbox();
+        let store = Store::open(Path::new(":memory:"), inbox.clone()).unwrap();
+        let mut m = with_files("01A", "lars/api");
+        assert!(store.insert(&mut m, false).unwrap());
+        let dir = folder(&m);
+        let want =
+            vec![("notes.md".to_string(), "# notes\n".to_string(), false), ("run.log".into(), "ok\n".into(), false)];
+        assert_eq!(saved(&dir), want);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(dir.join("notes.md")).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        // The message lists them by path, here and when read back; the database keeps only their names.
+        assert!(
+            m.files
+                .iter()
+                .all(|f| f.content.is_empty() && f.path.as_deref().unwrap().starts_with(&*dir.display().to_string()))
+        );
+        assert_eq!(store.unread("lars/api").unwrap()[0].files, m.files);
+        assert!(!stored_text(&store, "01A").unwrap().contains("# notes"));
+        // A retried delivery changes nothing.
+        std::fs::write(dir.join("run.log"), "kept").unwrap();
+        assert!(!store.insert(&mut with_files("01A", "lars/api"), false).unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join("run.log")).unwrap(), "kept");
+        std::fs::remove_dir_all(&inbox).unwrap();
+    }
+
+    #[test]
+    fn a_teammate_cant_name_another_teammates_folder() {
+        let inbox = temp_inbox();
+        let store = Store::open(Path::new(":memory:"), inbox.clone()).unwrap();
+        let mut alice = with_files("01ALICEMSG", "lars/api");
+        store.insert(&mut alice, false).unwrap();
+        // The same id in another case (one name on macOS and Windows), and a device name: folders of their own.
+        let mut bob = with_files("01alicemsg", "lars/api");
+        bob.files = vec![file("notes.md", "bob's")];
+        store.insert(&mut bob, false).unwrap();
+        store.insert(&mut with_files("CON", "lars/api"), false).unwrap();
+        assert_eq!(std::fs::read_to_string(folder(&alice).join("notes.md")).unwrap(), "# notes\n");
+        assert_eq!(std::fs::read_to_string(folder(&bob).join("notes.md")).unwrap(), "bob's");
+        let names = folders(&inbox);
+        assert_eq!(names.len(), 3);
+        assert!(names.iter().all(|n| ulid::Ulid::from_string(n).is_ok_and(|u| u.to_string() == *n)), "{names:?}");
+        std::fs::remove_dir_all(&inbox).unwrap();
+    }
+
+    #[test]
+    fn a_held_messages_files_are_saved_only_once_approved() {
+        let inbox = temp_inbox();
+        let store = Store::open(Path::new(":memory:"), inbox.clone()).unwrap();
+        store.insert(&mut with_files("01H", "lars/api"), true).unwrap();
+        store.insert(&mut with_files("01D", "lars/api"), true).unwrap();
+        assert!(folders(&inbox).is_empty());
+        // Held, the text is kept to save later (and shown to the person by name, with no path).
+        let held = store.held().unwrap();
+        assert_eq!(held[0].files[0].content, "# notes\n");
+        assert_eq!(held[0].files[0].path, None);
+        // Dropped: nothing is ever written.
+        assert_eq!(store.settle_held(&["01D".into()], false).unwrap().0.len(), 1);
+        assert!(folders(&inbox).is_empty() && store.message("01D").unwrap().is_none());
+        // Approved: saved now, and listed by path.
+        let (released, unsaved) = store.settle_held(&["01H".into()], true).unwrap();
+        assert!(unsaved.is_empty());
+        assert_eq!(saved(&folder(&released[0])).len(), 2);
+        assert_eq!(store.unread("lars/api").unwrap()[0].files, released[0].files);
+        assert!(!stored_text(&store, "01H").unwrap().contains("# notes"));
+        std::fs::remove_dir_all(&inbox).unwrap();
+    }
+
+    #[test]
+    fn a_held_message_whose_files_cant_be_saved_stays_held_and_the_rest_are_approved() {
+        let inbox = temp_inbox();
+        let store = Store::open(Path::new(":memory:"), inbox.clone()).unwrap();
+        // A name no file system takes (it never passes `check`, but a damaged record could hold one).
+        let mut bad = with_files("01BAD", "lars/api");
+        bad.files = vec![file("no/such/folder.md", "x")];
+        store.insert(&mut bad, true).unwrap();
+        store.insert(&mut with_files("01GOOD", "lars/api"), true).unwrap();
+        let (released, unsaved) = store.settle_held(&[], true).unwrap();
+        assert_eq!(released.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["01GOOD"]);
+        assert_eq!(unsaved.len(), 1);
+        assert_eq!(unsaved[0].0, "01BAD");
+        assert_eq!(store.held().unwrap().iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["01BAD"]);
+        std::fs::remove_dir_all(&inbox).unwrap();
+    }
+
+    #[test]
+    fn files_go_with_their_message_and_none_stay_long() {
+        let inbox = temp_inbox();
+        let store = Store::open(Path::new(":memory:"), inbox.clone()).unwrap();
+        let day = 86_400_000;
+        let session = |name: &str| Remembered {
+            name: name.into(),
+            key: name.into(),
+            agent: "claude-code".into(),
+            cwd: "~".into(),
+            repo: None,
+            branch: None,
+            doing: None,
+            tier: Tier::Push,
+            last_seen: 0,
+        };
+        store.upsert_session(&session("gone")).unwrap();
+        store.upsert_session(&session("api")).unwrap();
+        let mut gone = with_files("01GONE", "lars/gone");
+        store.insert(&mut gone, false).unwrap();
+        let mut stored = HashMap::new();
+        for id in ["01UNREAD", "01RECENT", "01OLD"] {
+            let mut m = with_files(id, "lars/api");
+            store.insert(&mut m, false).unwrap();
+            stored.insert(id, folder(&m).file_name().unwrap().to_string_lossy().into_owned());
+        }
+        store.insert(&mut with_files("01HELD", "lars/api"), true).unwrap();
+        std::fs::create_dir_all(inbox.join("01ORPHAN")).unwrap();
+        // What they take counts against the quota: saved or held.
+        let one = files::size(&with_files("x", "y").files);
+        assert_eq!(store.files_kept().unwrap(), 5 * one);
+        // Counted per sending person too (`sven/claude` sent them all; `sv` is someone else).
+        assert_eq!((store.files_kept_from("sven").unwrap(), store.files_kept_from("sv").unwrap()), (5 * one, 0));
+        // The unread mail of a session forgotten after a day goes, and its files with it.
+        store.forget_sessions(i64::MAX, &HashSet::from(["api"]), "lars").unwrap();
+        assert!(!folder(&gone).exists());
+        // Read files stay a day; unread ones until read; a folder no message names goes.
+        let now = util::now_ms();
+        store.mark_read(&["01RECENT".into()], now - day / 2).unwrap();
+        store.mark_read(&["01OLD".into()], now - day - 1).unwrap();
+        store.sweep_files(now).unwrap();
+        assert_eq!(folders(&inbox), HashSet::from([stored["01UNREAD"].clone(), stored["01RECENT"].clone()]));
+        assert_eq!(store.files_kept().unwrap(), 3 * one);
+        // A week on: unread files go (the message stays, without them), and so does a message held with files.
+        store.sweep_files(now + files::KEEP_UNREAD_MS + 1).unwrap();
+        assert!(folders(&inbox).is_empty());
+        assert!(store.unread("lars/api").unwrap().iter().all(|m| m.files.is_empty()));
+        assert_eq!(store.unread_count("lars/api").unwrap(), 1);
+        assert!(store.held().unwrap().is_empty());
+        assert_eq!(store.files_kept().unwrap(), 0);
+        std::fs::remove_dir_all(&inbox).unwrap();
     }
 }

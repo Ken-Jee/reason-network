@@ -36,6 +36,12 @@ const MAX_FRAME: usize = 4 << 20;
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Two machines that dial each other at once open their connections within this long of each other.
 const DIALED_TOGETHER: Duration = Duration::from_secs(5);
+/// The relays of a team that doesn't run its own: Reason's. n0's public ones are rate-limited and meant for testing.
+pub const DEFAULT_RELAYS: &[&str] = &["https://relay-sfo1.compute.reasonmachines.com"];
+
+pub fn default_relays() -> Vec<RelayUrl> {
+    DEFAULT_RELAYS.iter().map(|u| u.parse().expect("default relays are urls")).collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -53,14 +59,31 @@ pub struct Presence {
     pub sessions: Vec<SessionInfo>,
     /// Names of this machine's offline sessions, so mail for them can be queued here.
     pub known: Vec<String>,
+    /// What this machine's engine takes beyond what every version does (`files`). Older engines leave it out, and
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl Presence {
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub team: String,
     pub secret: String,
     pub person: String,
     pub machine: String,
+    /// The joiner's Reason sign-in proof. Builds before proofs ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
+    /// Let another computer of the account holding the name in only from one of that person's machines (see
+    /// `TeamState::redeem`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_only: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,8 +119,8 @@ struct Link {
 
 pub struct Net {
     endpoint: Endpoint,
-    /// The team's own relay, if it has one: teammates are dialed through it, as nothing looks them up on n0's DNS.
-    relay: Option<RelayUrl>,
+    /// Where teammates are dialed: the team's own relay (nothing looks them up on n0's DNS then), or the default ones.
+    relays: Vec<RelayUrl>,
     router: Mutex<Option<Router>>,
     /// Endpoints listening for joins on behalf of invite codes, by their (code-derived) id.
     invites: Mutex<HashMap<EndpointId, Router>>,
@@ -115,7 +138,9 @@ pub struct Net {
 
 pub async fn bind(key: SecretKey, relay: Option<&str>, lan: bool) -> Result<Endpoint> {
     let Some(url) = relay else {
-        let mut b = Endpoint::builder(presets::N0).secret_key(key);
+        // The default relays, with n0's address lookup still: that is how a teammate on an older Reason Network (on
+        // n0's relays) and this machine find each other, and what four-word codes need.
+        let mut b = Endpoint::builder(presets::N0).secret_key(key).relay_mode(RelayMode::custom(default_relays()));
         if lan {
             b = b.address_lookup(MdnsAddressLookup::builder());
         }
@@ -188,9 +213,18 @@ async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
     Ok(serde_json::from_slice(&buf)?)
 }
 
+/// How a join went: the team and the machine that let this one in, or why not; and whether a machine on the link
+/// couldn't be reached (it may yet be, shortly).
+pub struct Joined {
+    pub result: Result<(TeamState, EndpointId)>,
+    pub unreachable: bool,
+}
+
 /// Joins a team: asks each machine in turn (the ticket's, or the one an invite code points at) to let us in.
-pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest) -> Result<TeamState> {
+pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest) -> Joined {
     let mut last = anyhow!("the invite lists no machines");
+    let mut refused = Refusals::default();
+    let mut unreachable = false;
     for addr in peers {
         let attempt = || async {
             let conn = endpoint.connect(addr.clone(), JOIN_ALPN).await?;
@@ -213,14 +247,42 @@ pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest
             }
         };
         match reply {
-            Ok(Ok(JoinReply::Ok { state })) => return Ok(*state),
-            // A refusal is final: another machine would say the same.
-            Ok(Ok(JoinReply::Err { error })) => bail!(error),
-            Ok(Err(e)) => last = e,
-            Err(_) => last = anyhow!("couldn't reach the machine that made the invite (is it online?)"),
+            Ok(Ok(JoinReply::Ok { state })) => return Joined { result: Ok((*state, addr.id)), unreachable },
+            Ok(Ok(JoinReply::Err { error })) => {
+                if let Err(e) = refused.add(req, error) {
+                    return Joined { result: Err(e), unreachable };
+                }
+            }
+            Ok(Err(e)) => {
+                unreachable = true;
+                last = e;
+            }
+            Err(_) => {
+                unreachable = true;
+                last = anyhow!("couldn't reach the machine that made the invite (is it online?)");
+            }
         }
     }
-    Err(last)
+    Joined { result: Err(refused.0.map_or(last, |r| anyhow!(r))), unreachable }
+}
+
+/// What the machines asked so far refused a join with. A refusal is final: another machine would say the same. Except
+/// for a joiner with a sign-in proof: a machine may not be one of the person's own (`SAME_ACCOUNT`), or may be an older
+/// one that knows nothing of proofs (and says the name is taken), while one further down the link can still let it in.
+#[derive(Default)]
+struct Refusals(Option<String>);
+
+impl Refusals {
+    fn add(&mut self, req: &JoinRequest, error: String) -> Result<()> {
+        if req.proof.is_none() {
+            bail!(error);
+        }
+        // Told once that it's the same account, the joiner keeps that (not an older machine's "taken").
+        if self.0.as_ref().is_none_or(|r| !r.contains(crate::team::SAME_ACCOUNT)) {
+            self.0 = Some(error);
+        }
+        Ok(())
+    }
 }
 
 /// Nothing is known yet about where that machine is.
@@ -320,7 +382,7 @@ impl Net {
             )),
             invites: Default::default(),
             endpoint,
-            relay: relay.and_then(|u| u.parse().ok()),
+            relays: relay.map_or_else(default_relays, |u| u.parse().into_iter().collect()),
             daemon: Arc::downgrade(daemon),
             links: Default::default(),
             remote: Mutex::new(remote),
@@ -483,8 +545,9 @@ impl Net {
     }
 
     async fn dial(self: Arc<Self>, id: EndpointId) {
+        // On the default relays, n0's address lookup runs too: a teammate may be on n0's (an older Reason Network).
         let mut addr = EndpointAddr::new(id);
-        if let Some(url) = &self.relay {
+        for url in &self.relays {
             addr = addr.with_relay_url(url.clone());
         }
         match tokio::time::timeout(Duration::from_secs(20), self.endpoint.connect(addr, ALPN)).await {
@@ -515,7 +578,7 @@ impl Net {
     pub fn note_session(&self, peer: &EndpointId, name: &str) {
         let mut remote = self.remote.lock().unwrap();
         let rem = remote.entry(*peer).or_insert_with(|| Remote {
-            presence: Presence { sessions: Vec::new(), known: Vec::new() },
+            presence: Presence::default(),
             last_seen: util::now_ms(),
             online: true,
         });
@@ -697,12 +760,47 @@ fn tidy_presence(mut p: Presence) -> Presence {
         .map(|n| util::slug(n).chars().take(64).collect())
         .filter(|n: &String| !n.is_empty())
         .collect();
+    p.features.truncate(20);
+    p.features.iter_mut().for_each(|f| *f = util::slug(f).chars().take(32).collect());
     p
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_joiner_with_a_proof_asks_on_past_a_refusal() {
+        let req = |proof: Option<&str>, owner_only| JoinRequest {
+            team: String::new(),
+            secret: String::new(),
+            person: "alex".into(),
+            machine: "mini".into(),
+            proof: proof.map(String::from),
+            owner_only,
+        };
+        let taken = "'alex' is already in this team; join with another name (--as)";
+        let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
+        // Without a proof, the first refusal is the answer.
+        assert!(Refusals::default().add(&req(None, false), taken.into()).is_err());
+        // With one, in either pass (the second asks without owner_only), an older machine's "taken" isn't final: a
+        // machine of this build further down the link may let it in.
+        for owner_only in [true, false] {
+            let mut r = Refusals::default();
+            r.add(&req(Some("jws"), owner_only), taken.into()).unwrap();
+            r.add(&req(Some("jws"), owner_only), same.into()).unwrap();
+            r.add(&req(Some("jws"), owner_only), taken.into()).unwrap();
+            assert_eq!(r.0.as_deref(), Some(same), "the same account, once known, is what it says in the end");
+        }
+    }
+
+    #[test]
+    fn the_default_relay_is_reasons_and_none_of_n0s() {
+        let relays = default_relays();
+        assert_eq!(relays.len(), DEFAULT_RELAYS.len());
+        assert_eq!(relays[0].to_string(), "https://relay-sfo1.compute.reasonmachines.com/");
+        assert!(relays.iter().all(|u| u.scheme() == "https" && !u.as_str().contains(".n0.iroh.link")));
+    }
 
     #[test]
     fn a_stale_connection_is_replaced_but_a_simultaneous_dial_is_dropped() {
@@ -718,5 +816,29 @@ mod tests {
         // The same side dialing again is a reconnect, not a race.
         assert!(!is_duplicate(small, new, small, small));
         assert!(!is_duplicate(large, new, large, small));
+    }
+
+    #[test]
+    fn presence_says_files_are_taken_and_older_engines_read_it_as_before() {
+        let new =
+            Presence { known: vec!["api".into()], features: vec![crate::files::FEATURE.into()], ..Default::default() };
+        assert!(new.has("files"));
+        let wire = serde_json::to_string(&Wire::Presence { presence: new }).unwrap();
+        // As an engine from before files reads it: the field is ignored.
+        #[derive(Deserialize)]
+        struct OlderPresence {
+            known: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "t", rename_all = "snake_case")]
+        enum OlderWire {
+            Presence { presence: OlderPresence },
+        }
+        let OlderWire::Presence { presence } = serde_json::from_str(&wire).unwrap();
+        assert_eq!(presence.known, ["api"]);
+        // And an older engine's presence says nothing of files.
+        let older: Presence = serde_json::from_str(r#"{"sessions":[],"known":[]}"#).unwrap();
+        assert!(!older.has("files"));
+        assert!(tidy_presence(Presence { features: vec!["files".into()], ..Default::default() }).has("files"));
     }
 }
