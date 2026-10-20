@@ -342,6 +342,10 @@ pub struct TeamInfo {
     pub person: String,
     pub machine: String,
     pub machines: Vec<MachineInfo>,
+    /// What this engine takes beyond what every version does (`files`), for local clients that pass such things on
+    /// for others. Older engines leave it out.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
