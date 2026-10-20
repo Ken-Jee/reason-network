@@ -235,15 +235,32 @@ pub struct Reply {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// For a failure the Reason CLI handles: `name_taken` or `same_account_needs_owner` (see [`error_code`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl Reply {
     pub fn ok(id: u64, result: Value) -> Self {
-        Reply { id, ok: true, result: Some(result), error: None }
+        Reply { id, ok: true, result: Some(result), error: None, code: None }
     }
 
     pub fn err(id: u64, e: anyhow::Error) -> Self {
-        Reply { id, ok: false, result: None, error: Some(format!("{e:#}")) }
+        let error = format!("{e:#}");
+        Reply { id, ok: false, result: None, code: error_code(&error).map(String::from), error: Some(error) }
+    }
+}
+
+/// The failures a client acts on, by what the message says (as every build says it, a joiner hears an inviting machine's
+/// own words): `same_account_needs_owner` when one of the person's own computers should let this one in, `name_taken`
+/// when the name is someone else's in the team.
+pub fn error_code(error: &str) -> Option<&'static str> {
+    if error.contains(crate::team::SAME_ACCOUNT) {
+        Some(crate::team::SAME_ACCOUNT)
+    } else if error.contains("is already in this team") {
+        Some("name_taken")
+    } else {
+        None
     }
 }
 
@@ -450,5 +467,20 @@ mod tests {
             "machine": "mbp", "machines": []}))
             .unwrap();
         assert_eq!((old.id.as_str(), old.name.as_str()), ("", "vibes"));
+    }
+
+    #[test]
+    fn error_replies_carry_a_code_the_reason_cli_acts_on() {
+        let reply = |m: &str| serde_json::to_value(Reply::err(7, anyhow::anyhow!(m.to_string()))).unwrap();
+        assert_eq!(
+            reply("'alex' is already in this team; join with another name (--as)"),
+            serde_json::json!({"id": 7, "ok": false, "error": "'alex' is already in this team; join with another name (--as)",
+                               "code": "name_taken"})
+        );
+        let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
+        assert_eq!(reply(same)["code"], "same_account_needs_owner");
+        // Anything else, and every success, has none.
+        assert_eq!(reply("this sign-in proof expired; sign in again").get("code"), None);
+        assert_eq!(serde_json::to_value(Reply::ok(7, serde_json::json!(1))).unwrap().get("code"), None);
     }
 }

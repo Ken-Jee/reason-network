@@ -168,6 +168,21 @@ _, out = run(mal, "init", "x", "--proof", proof("u_mallory", "mallory", mal_ep, 
 check("init refuses a proof for something else", "isn't from Reason Network" in out and "Created" not in out, out)
 out, both = run(mal, "join", link.group(1), "--proof", "garbage", "--no-setup", "--json")
 check("with --json every failure is JSON", as_json(out) == {"error": "this sign-in proof is damaged"}, both)
+# The Reason CLI joins over the daemon's socket (the proof never on a command line): its error replies carry a code.
+sock_path = os.path.join(mal["REASON_NETWORK_HOME"], "network.sock")
+if len(sock_path) < 100:  # longer ones get a hashed name elsewhere (see paths::socket)
+    import socket
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(90)
+        sock.connect(sock_path)
+        req = {"id": 1, "op": "join", "ticket": link.group(1), "person": "x", "proof": proof("u_mallory", "alex", mal_ep)}
+        sock.sendall((json.dumps(req) + "\n").encode())
+        reply = as_json(sock.makefile().readline())
+    check("over the socket, a taken name's error reply has code name_taken",
+          reply.get("id") == 1 and reply.get("ok") is False and reply.get("code") == "name_taken"
+          and "is already in this team" in reply.get("error", ""), reply)
+else:
+    check("the socket's path is short enough to reach (set TMPDIR shorter)", False, sock_path)
 code = re.search(r"Invite code for a teammate: ([a-z]+(?:-[a-z]+){3})", cli("alex", "invite", "--code"))
 _, out = run(mal, "join", code.group(1), "--proof", proof("u_mallory", "mallory", mal_ep), "--no-setup")
 check("a sign-in joins only with a link, never a four-word code", "not a four-word code" in out and "Joined" not in out, out)

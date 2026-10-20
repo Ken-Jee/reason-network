@@ -677,14 +677,7 @@ fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
 /// message.
 fn json_failure(e: &anyhow::Error) -> serde_json::Value {
     let msg = format!("{e:#}");
-    let error = if msg.contains(team::SAME_ACCOUNT) {
-        team::SAME_ACCOUNT
-    } else if msg.contains("is already in this team") {
-        "name_taken"
-    } else {
-        msg.as_str()
-    };
-    serde_json::json!({ "error": error })
+    serde_json::json!({ "error": proto::error_code(&msg).unwrap_or(&msg) })
 }
 
 /// The running daemon's pid, from its lock file.
