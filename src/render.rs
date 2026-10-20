@@ -201,9 +201,9 @@ fn link(m: &MachineInfo, now: i64) -> String {
     m.last_seen.map_or_else(|| "not seen yet".to_string(), |t| format!("offline {}", util::ago(t, now)))
 }
 
-/// What a team that doesn't run its own relay uses.
+/// What a team that doesn't run its own relay uses: the nearest of Reason's (see `relays`).
 pub fn default_relays() -> String {
-    format!("{} (Reason's, the default)", crate::net::DEFAULT_RELAYS.join(", "))
+    "Reason's (the default)".into()
 }
 
 pub fn team(t: &TeamInfo) -> String {
@@ -410,10 +410,7 @@ mod tests {
             machines: Vec::new(),
             features: Vec::new(),
         };
-        assert_eq!(
-            team(&t),
-            "team vibes · relay: https://relay-sfo1.compute.reasonmachines.com (Reason's, the default)\n"
-        );
+        assert_eq!(team(&t), "team vibes · relay: Reason's (the default)\n");
         t.relay = Some("https://relay.example.com".into());
         assert_eq!(team(&t), "team vibes · relay: https://relay.example.com\n");
     }

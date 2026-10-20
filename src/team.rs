@@ -46,7 +46,7 @@ impl<T: Serialize> Signed<T> {
 pub struct Meta {
     pub name: String,
     /// A self-hosted iroh relay for the team (`https://relay.example.com`), which is then all its machines use: they
-    /// never contact n0. The default relays otherwise (`net::DEFAULT_RELAYS`; an older Reason Network uses n0's).
+    /// never contact n0. Reason's otherwise (see `relays`; an older Reason Network uses n0's).
     pub relay: Option<String>,
     pub ts: i64,
 }

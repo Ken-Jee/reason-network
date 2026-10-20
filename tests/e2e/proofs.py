@@ -1,7 +1,7 @@
-"""Reason sign-in proofs for the e2e tests: a stand-in for Reason's signing key, trusted through
+"""Reason sign-in proofs and relay lists for the e2e tests: a stand-in for Reason's signing key, trusted through
 REASON_NETWORK_TRUST_KEYS (debug builds). RS256 (RSASSA-PKCS1-v1_5 with SHA-256) in plain Python, so the tests need
 nothing installed: keys are made fresh for each run."""
-import base64, hashlib, json, secrets, time
+import base64, hashlib, http.server, json, secrets, threading, time
 
 # DER of the DigestInfo for SHA-256, which PKCS#1 v1.5 puts before the hash (RFC 8017, 9.2).
 SHA256_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
@@ -70,3 +70,38 @@ def proof(sub, name, endpoint, key=None, **claims):
     head = {"alg": "RS256", "kid": KID, "typ": "reason-network-proof"}
     signing = f"{b64(json.dumps(head).encode())}.{b64(json.dumps(body).encode())}"
     return f"{signing}.{b64(sign(key or REASON, signing.encode()))}"
+
+
+RELAY = {r: f"https://relay-{r}.compute.reasonmachines.com" for r in ("sfo1", "iad1", "fra1", "sin1")}
+
+
+def relay_list(regions):
+    """relays.json as Reason serves it: the list, and the same list signed."""
+    relays = [{"url": RELAY[r], "region": r} for r in regions]
+    now = int(time.time())
+    claims = {"iss": "https://reasonmachines.com/network/relays", "aud": "reason-network", "relays": relays,
+              "iat": now, "exp": now + 30 * 86400}
+    head = {"alg": "RS256", "kid": KID, "typ": "reason-network-relays"}
+    signing = f"{b64(json.dumps(head).encode())}.{b64(json.dumps(claims).encode())}"
+    return json.dumps({"relays": relays, "signed": f"{signing}.{b64(sign(REASON, signing.encode()))}"}).encode()
+
+
+def serve_relay_lists(lists):
+    """Serves `lists` ({name: regions}) at /<name>.json on a local port, for REASON_NETWORK_RELAYS_URL (debug builds),
+    so tests never fetch Reason's real list; the server's base URL."""
+    docs = {f"/{name}.json": relay_list(regions) for name, regions in lists.items()}
+
+    class Lists(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = docs.get(self.path, b"")
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Lists)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_port}"

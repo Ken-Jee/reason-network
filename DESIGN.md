@@ -87,11 +87,20 @@ SDK) both exist and work today. Zig has neither, which is why agent-rpc's MCP sh
 **Transport: iroh 1.3.** Each daemon is an iroh `Endpoint` with a persistent secret key
 (`~/.reason/network/machine.key`). Peers are dialed by `EndpointId`; iroh resolves addresses via n0 DNS/pkarr, finds
 LAN peers with `iroh-mdns-address-lookup` (works with no internet), hole-punches, and falls back to a relay
-over HTTPS. Relays only see encrypted QUIC. The default relay is Reason's (`DEFAULT_RELAYS` in `src/net.rs`, a list
-so more regions can join), as n0's public relays are rate-limited and meant for development. A team without its own
+over HTTPS. Relays only see encrypted QUIC. The default relays are Reason's, one per region, as Reason lists them at
+`https://reasonmachines.com/network/relays.json` (`src/relays.rs`), as n0's public relays are rate-limited and meant
+for development. Each machine makes the one with the lowest latency its home relay; relays don't talk to each other,
+but iroh reaches a peer through the peer's home relay, so machines homed on different ones still find each other. The
+list steers relay traffic (end-to-end encrypted, but a bad list could cut machines off or show who talks to whom), so
+it is taken only signed with the same key as sign-in proofs (its own `typ`, `reason-network-relays`, and `iss`),
+fetched only over HTTPS from that address without following redirects, and rejected whole on any fault (an http
+relay, a duplicate, more than 16, over 64 KiB, expired). The daemon fetches it at start (waiting briefly for it on a
+machine's first network start) and every 6 hours, keeps the last good one in the state folder (`relays.json`, used
+even once expired while no newer comes), and applies a new one at the next network start. Without any, sfo1
+(`DEFAULT_RELAYS` in `src/net.rs`). A team without its own
 relay still looks addresses up on n0's DNS, where each machine publishes its home relay: that is how a machine on
 Reason's relay and one of an older build, on n0's, find each other (iroh dials a peer through whichever relay it is
-on), and what a four-word code needs. Teammates are also dialed through the default relay itself, so machines of this
+on), and what a four-word code needs. Teammates are also dialed through each of the default relays, so machines of this
 build find each other even without that lookup. A team can set its own relay
 (`reason-network relay <url>` or `reason-network init --relay <url>`; the `iroh-relay` binary on any VPS, Let's Encrypt on :443,
 access limited to the roster's endpoint ids). Then its machines never contact n0: they use only that relay

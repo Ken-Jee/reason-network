@@ -7,7 +7,7 @@ test messages into that real session (they say "ignore this").
 """
 import base64, json, os, re, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from proofs import TRUST, keygen, proof
+from proofs import TRUST, keygen, proof, serve_relay_lists
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.path.join(ROOT, "target", "debug", "reason-network")
@@ -22,6 +22,8 @@ IN_CLAUDE = "CLAUDE_CODE_MESSAGING_SOCKET" in os.environ
 # First on PATH: nothing here may open a browser or reach this machine's real notifications.
 FAKE_BIN = os.path.join(D, "bin")
 UNEXPECTED = os.path.join(D, "unexpected.log")
+# Reason's relay list, served here: never the real one.
+RELAYS_URL = serve_relay_lists({"all": ["sfo1", "iad1", "fra1", "sin1"]}) + "/all.json"
 results = []
 
 
@@ -33,7 +35,7 @@ def check(name, ok, detail=""):
 def env(who, strip_claude=True):
     e = dict(os.environ, REASON_NETWORK_HOME=H[who], REASON_NETWORK_MACHINE=MACHINE[who], REASON_NETWORK_NO_MDNS="1", REASON_NETWORK_NO_SERVICE="1", REASON_NETWORK_CODEX_BIN=FAKE_CODEX)
     e.update({"HOME": os.path.join(D, "home"), "PATH": FAKE_BIN + os.pathsep + os.environ["PATH"], "REASON_NETWORK_NO_UPDATE": "1",
-              "REASON_NETWORK_NO_TRAY": "1", "REASON_NETWORK_TRUST_KEYS": TRUST})
+              "REASON_NETWORK_NO_TRAY": "1", "REASON_NETWORK_TRUST_KEYS": TRUST, "REASON_NETWORK_RELAYS_URL": RELAYS_URL})
     e.update({"REASON_NETWORK_OSASCRIPT_BIN": FAKE_NOTIFY, "REASON_NETWORK_NOTIFY-SEND_BIN": FAKE_NOTIFY, "DBUS_SESSION_BUS_ADDRESS": "test",
               "NOTIFY_LOG": os.path.join(D, f"notify-{who}.log")})
     if strip_claude:
@@ -160,8 +162,9 @@ out = cli("alice", "team")
 check("joiner sees alex connected, verified", re.search(r"alex \(verified\)\s+laptop\s+(direct|relay)", out) is not None, out)
 out = cli("alex", "team")
 check("founder sees alice connected, verified", re.search(r"alice \(verified\)\s+desktop\s+(direct|relay)", out) is not None, out)
-check("a team without a relay of its own is on Reason's: the link names it as where alex is",
-      link_relays(link.group(1)) == ["", "https://relay-sfo1.compute.reasonmachines.com/"] and "(Reason's, the default)" in out, out)
+check("a team without a relay of its own is on Reason's: the link names the one alex is on",
+      link_relays(link.group(1))[0] == "" and re.fullmatch(r"https://relay-\w+\.compute\.reasonmachines\.com/", link_relays(link.group(1))[1])
+      and "relay: Reason's (the default)" in out, out)
 j = as_json(cli("alex", "team", "--json"))
 check("team --json marks people verified, and each machine's proof", [(m["verified"], m["has_proof"]) for m in j.get("members", [])] == [(True, True)] * 2
       and j.get("link", "").startswith("https://") and j.get("team_name") == "vibes" and len(j.get("team_id", "")) == 32, j)
