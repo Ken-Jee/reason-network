@@ -7,7 +7,7 @@ Needs internet (iroh relays/discovery).
 """
 import json, os, re, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from proofs import TRUST, proof
+from proofs import TRUST, proof, serve_relay_lists
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NEW = os.path.join(ROOT, "target", "debug", "reason-network")
@@ -15,6 +15,8 @@ OLD = os.environ["REASON_NETWORK_OLD_BIN"]
 D = tempfile.mkdtemp(prefix="reason-network-mixed-")
 FAKE_BIN = os.path.join(D, "bin")
 UNEXPECTED = os.path.join(D, "unexpected.log")
+# Reason's relay list, served here for this build (debug): never the real one. The older build has no list.
+RELAYS_URL = serve_relay_lists({"all": ["sfo1", "iad1", "fra1", "sin1"]}) + "/all.json"
 # alex and nina run this build, olga the older one.
 WHO = {"alex": (NEW, "laptop"), "olga": (OLD, "oldbox"), "nina": (NEW, "desk"), "nina2": (NEW, "pad"), "nina3": (NEW, "tab"), "mal": (NEW, "evil")}
 results = []
@@ -30,7 +32,7 @@ def env(who):
     e.update(HOME=os.path.join(D, "home"), PATH=FAKE_BIN + os.pathsep + os.environ["PATH"], CLAUDE_CONFIG_DIR=os.path.join(D, "claude"),
              REASON_NETWORK_HOME=os.path.join(D, who), REASON_NETWORK_MACHINE=WHO[who][1], REASON_NETWORK_NO_MDNS="1",
              REASON_NETWORK_NO_SERVICE="1", REASON_NETWORK_NO_UPDATE="1", REASON_NETWORK_NO_TRAY="1",
-             REASON_NETWORK_TRUST_KEYS=TRUST)
+             REASON_NETWORK_TRUST_KEYS=TRUST, REASON_NETWORK_RELAYS_URL=RELAYS_URL)
     return e
 
 

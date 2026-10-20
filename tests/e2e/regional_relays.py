@@ -6,18 +6,18 @@ debug builds honor), so alex knows only sfo1 and bea only fra1.
 
 Needs internet (Reason's live relays, n0's address lookup).
 """
-import base64, http.server, json, os, re, subprocess, sys, tempfile, threading, time
+import base64, os, re, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from proofs import KID, REASON, TRUST, b64, proof, sign
+from proofs import RELAY, TRUST, proof, serve_relay_lists
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.environ.get("REASON_NETWORK_TEST_BIN", os.path.join(ROOT, "target", "debug", "reason-network"))
 D = tempfile.mkdtemp(prefix="reason-network-relays-")
 FAKE_BIN = os.path.join(D, "bin")
 UNEXPECTED = os.path.join(D, "unexpected.log")
-RELAY = {r: f"https://relay-{r}.compute.reasonmachines.com" for r in ("sfo1", "iad1", "fra1", "sin1")}
 # Who knows which relays; carl's team runs its own (sin1), which must win over his list (fra1).
 WHO = {"alex": ("laptop", ["sfo1"]), "bea": ("desk", ["fra1"]), "carl": ("box", ["fra1"])}
+LISTS = serve_relay_lists({w: regions for w, (_, regions) in WHO.items()})
 results = []
 
 
@@ -26,42 +26,12 @@ def check(name, ok, detail=""):
     print(f"{'PASS' if ok else 'FAIL'}: {name}" + ("" if ok else f"\n      {detail}"))
 
 
-def relay_list(regions):
-    """relays.json as Reason serves it: the list, and the same list signed."""
-    relays = [{"url": RELAY[r], "region": r} for r in regions]
-    now = int(time.time())
-    claims = {"iss": "https://reasonmachines.com/network/relays", "aud": "reason-network", "relays": relays,
-              "iat": now, "exp": now + 30 * 86400}
-    head = {"alg": "RS256", "kid": KID, "typ": "reason-network-relays"}
-    signing = f"{b64(json.dumps(head).encode())}.{b64(json.dumps(claims).encode())}"
-    return json.dumps({"relays": relays, "signed": f"{signing}.{b64(sign(REASON, signing.encode()))}"}).encode()
-
-
-LISTS = {f"/{w}.json": relay_list(regions) for w, (_, regions) in WHO.items()}
-
-
-class Lists(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = LISTS.get(self.path)
-        self.send_response(200 if body else 404)
-        self.send_header("Content-Length", str(len(body or b"")))
-        self.end_headers()
-        self.wfile.write(body or b"")
-
-    def log_message(self, *args):
-        pass
-
-
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Lists)
-threading.Thread(target=server.serve_forever, daemon=True).start()
-
-
 def env(who):
     e = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     e.update(HOME=os.path.join(D, "home"), PATH=FAKE_BIN + os.pathsep + os.environ["PATH"], CLAUDE_CONFIG_DIR=os.path.join(D, "claude"),
              REASON_NETWORK_HOME=os.path.join(D, who), REASON_NETWORK_MACHINE=WHO[who][0], REASON_NETWORK_NO_MDNS="1",
              REASON_NETWORK_NO_SERVICE="1", REASON_NETWORK_NO_UPDATE="1", REASON_NETWORK_NO_TRAY="1",
-             REASON_NETWORK_TRUST_KEYS=TRUST, REASON_NETWORK_RELAYS_URL=f"http://127.0.0.1:{server.server_port}/{who}.json")
+             REASON_NETWORK_TRUST_KEYS=TRUST, REASON_NETWORK_RELAYS_URL=f"{LISTS}/{who}.json")
     return e
 
 
@@ -137,7 +107,6 @@ try:
 finally:
     for w in WHO:
         subprocess.run([BIN, "stop"], env=env(w), capture_output=True, timeout=30)
-    server.shutdown()
 log = open(UNEXPECTED).read() if os.path.exists(UNEXPECTED) else ""
 check("nothing opened a browser or reached the real notifications", log == "", log)
 print(f"\n{sum(results)}/{len(results)} checks passed  (state in {D})")
