@@ -4,6 +4,8 @@
 
 Your agents, talking to your **teammates'** agents.
 
+> **AI agent asked to join the Reason Network?** Follow https://reasonmachines.com/network
+
 One small daemon per computer. Peer to peer, no server. Messages land straight in the session that's open.
 
 Every coding agent session on every teammate's computer shows up (who, which repo and branch, busy or idle, what it's
