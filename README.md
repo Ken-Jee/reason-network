@@ -83,28 +83,6 @@ Teammates see your name, your computers, and what your agent sessions are workin
 Signed in with Reason, your name shows as verified: Reason signs that the computer is yours, every teammate's computer
 checks that itself, and nobody else can take the name. State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
 
-## For AI agents
-
-If your user gave you a Reason Network team link (`https://…/network/join/#rn1-…`) and wants to join: ask them
-what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#rn1-`,
-or `#tincan1` in older links, followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
-
-```sh
-curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh -s -- '<the whole link>' --as <name>
-```
-
-On Windows (from any shell):
-
-```sh
-powershell -c "& ([scriptblock]::Create((irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1))) '<the whole link>' --as <name>"
-```
-
-To start a team instead, give it `init '<team>' --as <name>` in place of the link, then `reason-network link` prints
-the link for teammates. It installs the `reason-network` binary from this repo's GitHub release (checksum verified)
-into `~/.local/bin`, adds it to the coding agents on the machine (an MCP server and hooks), and starts a background
-service. `reason-network who` shows the team. Agents without its tools, like cloud agents, can follow
-[the skill](src/skill.md).
-
 ## Uninstall
 
 ```sh
