@@ -37,6 +37,16 @@ curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<lin
 
 That's it. Ask any agent "who's on the team?", tell it to ask someone's agent something, or to send them a file.
 
+**Without an account**: install just this engine. It asks your name and a team name, and gives you a team link (on
+your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their agent
+"join my Reason Network team: <link>". Names aren't verified this way.
+
+```sh
+curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell: `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
+
 **Coming from tincan?** Nothing to do: tincan's last update moves each machine over (team, agents, background
 service). The command is now `reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to
 trust the new hooks.

@@ -49,6 +49,11 @@ def until(who, args, ok, secs=45):
         time.sleep(1)
 
 
+def logged(who):
+    p = os.path.join(D, who, "daemon.log")
+    return open(p, errors="replace").read() if os.path.exists(p) else ""
+
+
 def link_of(out):
     m = re.search(r"https://\S+/join/#\S+", out)
     return m.group(0) if m else ""
@@ -89,11 +94,14 @@ try:
     check("the older machine has all three, every signed entry checking out", three(out), out)
     # nina's second computer, through the older machine's link: it asks the link's machines for one of nina's own,
     # whose word the older machine takes too.
+    # (nina's machine is up and reachable: every machine sees it connected.)
+    until("alex", ["team"], lambda o: re.search(r"nina \(verified\)\s+desk\s+(direct|relay)", o))
     old_link = link_of(cli("olga", "link"))  # now listing nina's machine too
     out = cli("nina2", "join", old_link, "--proof", proof("u_nina", "nina", ep["nina2"]), "--no-setup")
     check("another computer of nina's account joins through the older machine's link", "Joined team mixed as nina on pad." in out, out)
+    check("…let in by nina's own machine", "joined team mixed as nina: let in by nina on desk" in logged("nina2"), logged("nina2")[-2000:])
     out = until("olga", ["team"], lambda o: re.search(r"nina\s+pad\s+(direct|relay)", o))
-    check("…let in by nina's own machine, so the older machine takes it too", re.search(r"nina\s+pad\s+(direct|relay)", out) is not None, out)
+    check("…so the older machine takes it too", re.search(r"nina\s+pad\s+(direct|relay)", out) is not None, out)
     cli("nina2", "leave")
     cli("nina2", "stop")
     # With nina's machine off, the older machine first on its link says the name is taken; alex's machine, further
@@ -102,6 +110,7 @@ try:
     until("olga", ["team"], lambda o: not re.search(r"nina\s+desk\s+(direct|relay)", o))
     out = cli("nina3", "join", link_of(cli("olga", "link")), "--proof", proof("u_nina", "nina", ep["nina3"]), "--no-setup")
     check("past the older machine's refusal, a machine of this build lets nina's computer in", "Joined team mixed as nina on tab." in out, out)
+    check("…alex's, on its proof", "joined team mixed as nina: let in by alex on laptop" in logged("nina3"), logged("nina3")[-2000:])
     out = until("alex", ["team"], lambda o: re.search(r"nina \(verified\)\s+tab\s+(direct|relay)", o))
     check("…which this build's machines take", re.search(r"nina \(verified\)\s+tab\s+(direct|relay)", out) is not None, out)
     cli("nina3", "leave")

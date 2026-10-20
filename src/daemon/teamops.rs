@@ -283,16 +283,31 @@ impl Daemon {
             owner_only: proof.is_some(),
         };
         // Another computer of an account that holds a name is best let in by one of that person's own machines, which
-        // every build takes: ask for that first. Else any machine of this build lets it in on its proof.
-        let res = match net::join(&endpoint, &peers, &req).await {
+        // every build takes: ask for that first, and once more shortly if a machine on the link couldn't be reached (it
+        // may be theirs, not found yet). Else any machine of this build lets it in on its proof, which builds before
+        // proofs don't take.
+        let same_account = |r: &Result<_>| matches!(r, Err(e) if e.to_string().contains(team::SAME_ACCOUNT));
+        let mut tried = net::join(&endpoint, &peers, &req).await;
+        if same_account(&tried.result) && tried.unreachable {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let again = net::join(&endpoint, &peers, &req).await;
+            if again.result.is_ok() {
+                tried = again;
+            }
+        }
+        let res = match tried.result {
             Err(e) if e.to_string().contains(team::SAME_ACCOUNT) => {
                 let any = JoinRequest { owner_only: false, ..req };
-                net::join(&endpoint, &peers, &any).await.map_err(|again| if taken(&again) { e } else { again })
+                net::join(&endpoint, &peers, &any).await.result.map_err(|again| if taken(&again) { e } else { again })
             }
             r => r,
         };
         endpoint.close().await;
-        let mut state = TeamState::verified(&res?)?;
+        let (state, by) = res?;
+        let mut state = TeamState::verified(&state)?;
+        let who =
+            state.member(&by).map_or_else(|| by.fmt_short().to_string(), |m| format!("{} on {}", m.person, m.machine));
+        log(&format!("joined team {} as {person}: let in by {who}", state.name()));
         let me = self.key.public();
         // A ticket names the team; a code can't (whoever answers on the code's key knows the code, so could make up a
         // team), which is why a sign-in joins only with a link.

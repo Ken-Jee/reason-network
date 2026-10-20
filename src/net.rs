@@ -213,10 +213,18 @@ async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
     Ok(serde_json::from_slice(&buf)?)
 }
 
+/// How a join went: the team and the machine that let this one in, or why not; and whether a machine on the link
+/// couldn't be reached (it may yet be, shortly).
+pub struct Joined {
+    pub result: Result<(TeamState, EndpointId)>,
+    pub unreachable: bool,
+}
+
 /// Joins a team: asks each machine in turn (the ticket's, or the one an invite code points at) to let us in.
-pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest) -> Result<TeamState> {
+pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest) -> Joined {
     let mut last = anyhow!("the invite lists no machines");
     let mut refused = Refusals::default();
+    let mut unreachable = false;
     for addr in peers {
         let attempt = || async {
             let conn = endpoint.connect(addr.clone(), JOIN_ALPN).await?;
@@ -239,13 +247,23 @@ pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest
             }
         };
         match reply {
-            Ok(Ok(JoinReply::Ok { state })) => return Ok(*state),
-            Ok(Ok(JoinReply::Err { error })) => refused.add(req, error)?,
-            Ok(Err(e)) => last = e,
-            Err(_) => last = anyhow!("couldn't reach the machine that made the invite (is it online?)"),
+            Ok(Ok(JoinReply::Ok { state })) => return Joined { result: Ok((*state, addr.id)), unreachable },
+            Ok(Ok(JoinReply::Err { error })) => {
+                if let Err(e) = refused.add(req, error) {
+                    return Joined { result: Err(e), unreachable };
+                }
+            }
+            Ok(Err(e)) => {
+                unreachable = true;
+                last = e;
+            }
+            Err(_) => {
+                unreachable = true;
+                last = anyhow!("couldn't reach the machine that made the invite (is it online?)");
+            }
         }
     }
-    Err(refused.0.map_or(last, |r| anyhow!(r)))
+    Joined { result: Err(refused.0.map_or(last, |r| anyhow!(r))), unreachable }
 }
 
 /// What the machines asked so far refused a join with. A refusal is final: another machine would say the same. Except
