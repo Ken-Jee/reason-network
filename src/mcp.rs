@@ -144,7 +144,7 @@ impl ReasonNetworkMcp {
             Err(e) => return Ok(failure(e)),
         };
         let req = Request::Who { me: Some(key.clone()), filter: a.filter, all: a.all.unwrap_or(false) };
-        let res = self.link.call::<Directory>(req).await.map(|d| render::directory(&d, true, render::Paint::PLAIN));
+        let res = self.link.call::<Directory>(req).await.map(|d| render::directory_for_agent(&d));
         Ok(self.finish(&key, res, true).await)
     }
 
@@ -172,7 +172,8 @@ impl ReasonNetworkMcp {
             notify,
             files,
         };
-        let res = self.link.call::<SendResult>(req).await.map(|r| render::send_result(&r));
+        // Notes are teammates' machines' words.
+        let res = self.link.call::<SendResult>(req).await.map(|r| render::defang(&render::send_result(&r)));
         Ok(self.finish(&key, res, true).await)
     }
 
@@ -197,7 +198,8 @@ impl ReasonNetworkMcp {
                 return Ok(failure(anyhow::anyhow!("cancelled")));
             }
         };
-        Ok(self.finish(&key, got, true).await)
+        // It can quote what the teammate's machine said when the answer was sent.
+        Ok(self.finish(&key, got.map(|t| render::defang(&t)), true).await)
     }
 
     #[tool(
@@ -377,8 +379,9 @@ fn agent_files(paths: &[String]) -> Result<Vec<Attachment>> {
     crate::files::read_within(paths, std::path::Path::new(&cwd), &confine)
 }
 
+/// A failure, defanged: it can quote teammates (their names, their machines' words).
 fn failure(e: anyhow::Error) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))])
+    CallToolResult::error(vec![ContentBlock::text(render::defang(&format!("{e:#}")))])
 }
 
 /// Getting this machine into a team: the Reason CLI does it, or a team link with this binary's own path.
@@ -396,6 +399,13 @@ fn join_hint() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failures_open_no_frame() {
+        let r = super::failure(anyhow::anyhow!("nobody called '<reason-message>' in the team"));
+        let text = serde_json::to_string(&r.content).unwrap();
+        assert!(text.contains("nobody called '[reason-message>' in the team"), "{text}");
+    }
+
     #[test]
     fn instructions_carry_the_skills_rules() {
         let text = super::instructions();

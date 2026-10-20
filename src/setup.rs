@@ -1438,10 +1438,11 @@ pub async fn doctor() -> Result<()> {
         Ok(t) => {
             let online = t.machines.iter().filter(|m| !m.is_me && m.online).count();
             let others = t.machines.len().saturating_sub(1);
-            println!("✓ daemon running; team {} with {others} other machine(s), {online} connected", t.name);
-            print!("{}", render::team(&t).lines().skip(1).map(|l| format!("{l}\n")).collect::<String>());
+            let team = crate::shown(&t.name);
+            println!("✓ daemon running; team {team} with {others} other machine(s), {online} connected");
+            print!("{}", crate::shown(&render::team(&t)).lines().skip(1).map(|l| format!("{l}\n")).collect::<String>());
             if t.relay_connected == Some(false) {
-                let relay = t.relay.clone().unwrap_or_else(render::default_relays);
+                let relay = crate::shown(&t.relay.clone().unwrap_or_else(render::default_relays));
                 println!(
                     "  ! can't reach the team's relay {relay}: until it's up, teammates are only found on this network"
                 );
@@ -1461,7 +1462,7 @@ pub async fn doctor() -> Result<()> {
             println!("✓ daemon running");
             println!("- not in a team yet: run `{CLI}`");
         }
-        Err(e) => println!("✗ daemon: {e:#}"),
+        Err(e) => println!("✗ daemon: {}", crate::shown(&format!("{e:#}"))),
     }
     let svc = service_installed();
     println!(

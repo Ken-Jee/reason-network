@@ -272,7 +272,7 @@ impl Daemon {
         };
         rows.sort_by_key(rank);
         Ok(Directory {
-            team: self.team_state().map(|t| t.name().to_string()),
+            team: self.team_state().map(|t| t.shown_name()),
             person: self.person.clone(),
             machine: self.machine.clone(),
             machines,
