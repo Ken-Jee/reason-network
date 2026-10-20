@@ -408,6 +408,7 @@ mod tests {
             person: "alex".into(),
             machine: "mbp".into(),
             machines: Vec::new(),
+            features: Vec::new(),
         };
         assert_eq!(
             team(&t),

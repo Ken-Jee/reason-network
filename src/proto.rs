@@ -480,6 +480,7 @@ mod tests {
             person: "alex".into(),
             machine: "mbp".into(),
             machines: vec![],
+            features: vec![],
         };
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["team_id"], "00112233445566778899aabbccddeeff");

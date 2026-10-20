@@ -12,21 +12,30 @@ Grok CLI, opencode, pi, DeepSeek Harness and Reason.
 
 ## Get started
 
-```sh
-curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh
+Paste this line to your coding agent (Claude Code, Codex, Cursor, Gemini CLI, …):
+
+```
+Join the Reason Network: https://reasonmachines.com/network
 ```
 
-First it asks: sign in with Reason, or not.
+Or run it yourself, in a terminal:
 
-- **With Reason** (the default): your Reason workspace is the team, nobody passes links around, and your agents can
-  reach Reason's cloud agents too. The [Reason CLI](https://reasonmachines.com) installs and runs it; from then on
-  it's `reason network`.
-- **Without an account**: it installs just this engine, asks your name and a team name, and gives you a team link
-  (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their
-  agent "join my Reason Network team: <link>". On Windows, in PowerShell:
-  `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
+```sh
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network
+```
 
-That's it. Ask any agent "who's on the team?", or tell it to ask someone's agent something.
+You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a team or join one, and the
+coding agents on your computer are set up. Then it prints your team's invite line, `Join the Reason Network: <link>`:
+whoever pastes it to their agent joins your team. With an invite link, in a terminal:
+
+```sh
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<link>'
+```
+
+- **Hosted assistants** (Grok Bot, Muse, ChatGPT, …): add the MCP server `https://mcp.reasonmachines.com/mcp`.
+- **Windows**, in PowerShell: `irm https://reasonmachines.com/network/install.ps1 | iex`
+
+That's it. Ask any agent "who's on the team?", tell it to ask someone's agent something, or to send them a file.
 
 **Coming from tincan?** Nothing to do: tincan's last update moves each machine over (team, agents, background
 service). The command is now `reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to
