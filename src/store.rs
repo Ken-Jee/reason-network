@@ -95,6 +95,19 @@ impl Store {
     pub fn open(path: &Path, inbox: PathBuf) -> Result<Self> {
         let db = Connection::open(path)?;
         db.execute_batch(SCHEMA)?;
+        // Deleted rows are overwritten, not just let go (see `scrub`).
+        db.execute_batch("PRAGMA secure_delete = ON;")?;
+        // Only this user reads it, like machine.key: it holds the team link. (SQLite gives the log files the mode the
+        // database has, but older installs made them with the default.)
+        #[cfg(unix)]
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.as_os_str().to_owned();
+            p.push(suffix);
+            let p = PathBuf::from(p);
+            if p.exists() {
+                crate::util::chmod(&p, 0o600)?;
+            }
+        }
         // Added in 0.10.7.
         if !db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'approval'")?.exists([])? {
             db.execute("ALTER TABLE messages ADD COLUMN approval TEXT", [])?;
@@ -333,6 +346,13 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Writes everything in the log into the database and empties the log, so what was deleted (with `secure_delete`,
+    /// overwritten) isn't still in it.
+    pub fn scrub(&self) -> Result<()> {
+        self.db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
     pub fn delete_prefix(&self, prefix: &str) -> Result<()> {
         self.db.execute("DELETE FROM kv WHERE key >= ?1 AND key < ?1 || x'ff'", [prefix])?;
         Ok(())
@@ -463,6 +483,33 @@ mod tests {
     use super::*;
     use crate::util;
     use std::collections::HashMap;
+
+    #[test]
+    #[cfg(unix)]
+    fn the_database_is_this_users_and_keeps_nothing_it_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("reason-network-store-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("network.db");
+        // A database made before, with the default mode.
+        drop(Store::open(&db, temp_inbox()).unwrap());
+        util::chmod(&db, 0o644).unwrap();
+        let store = Store::open(&db, temp_inbox()).unwrap();
+        let secret = "5ec7e75ec7e75ec7e75ec7e75ec7e75e";
+        store.set("team", &format!(r#"{{"link":{{"body":{{"secret":"{secret}"}}}}}}"#)).unwrap();
+        for f in ["network.db", "network.db-wal", "network.db-shm"] {
+            let mode = std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{f}");
+        }
+        store.delete_prefix("team").unwrap();
+        store.scrub().unwrap();
+        for f in ["network.db", "network.db-wal"] {
+            let bytes = std::fs::read(dir.join(f)).unwrap_or_default();
+            assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()), "{f} still holds it");
+        }
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_session_gone_a_day_is_forgotten_with_the_mail_it_never_read() {
