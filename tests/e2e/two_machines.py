@@ -208,7 +208,7 @@ if len(sock_path) < 100:  # longer ones get a hashed name elsewhere (see paths::
           and "is already in this team" in reply.get("error", ""), reply)
 else:
     check("the socket's path is short enough to reach (set TMPDIR shorter)", False, sock_path)
-code = re.search(r"Invite code for a teammate: ([a-z]+(?:-[a-z]+){3})", cli("alex", "invite", "--code"))
+code = re.search(r"One-time code for a teammate: ([a-z]+(?:-[a-z]+){3})", cli("alex", "invite", "--code"))
 _, out = run(mal, "join", code.group(1), "--proof", proof("u_mallory", "mallory", mal_ep), "--no-setup")
 check("a sign-in joins only with a link, never a four-word code", "not a four-word code" in out and "Joined" not in out, out)
 run(mal, "stop")
@@ -241,7 +241,7 @@ subprocess.run([BIN, "stop"], env=sam, capture_output=True)
 os.makedirs(os.path.join(D, "bob"), exist_ok=True)
 bob = dict(env("alice"), REASON_NETWORK_HOME=os.path.join(D, "bob"), REASON_NETWORK_MACHINE="nuc")
 out = cli("alex", "invite", "--code")
-code = re.search(r"Invite code for a teammate: ([a-z]+(?:-[a-z]+){3})", out)
+code = re.search(r"One-time code for a teammate: ([a-z]+(?:-[a-z]+){3})", out)
 check("invite --code prints a four-word code", bool(code), out)
 r = subprocess.run([BIN, "join", code.group(1).replace("-", " ").upper(), "--as", "bob", "--no-setup"], env=bob,
                    capture_output=True, text=True, timeout=90)

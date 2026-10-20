@@ -1,7 +1,9 @@
 #!/bin/sh
-# Installs Reason Network for macOS or Linux: with the Reason CLI (sign in), or on its own (no account).
+# Installs Reason Network for macOS or Linux. In a terminal it first hands over to Reason's own setup
+# (https://reasonmachines.com/install.sh … network: sign in, create or join a network, and get its invite line);
+# otherwise, or when told not to, it installs this engine on its own.
 #
-#   curl -fsSL <this url> | sh                      install, then set up (with Reason, or start or join a team)
+#   curl -fsSL <this url> | sh                      install, then set up
 #   curl -fsSL <this url> | sh -s -- <team link>    install, then join that team
 #   curl -fsSL <this url> | sh -s -- <team link> --as <name>     the same, without questions (for agents)
 #   curl -fsSL <this url> | sh -s -- init <team> --as <name>     install and start a team, without questions
@@ -29,24 +31,19 @@ case "$(uname -m)" in
 esac
 target="$arch-$os"
 
-# Starting fresh in a terminal: Reason first. With it, your Reason workspace is the team (no links to pass around),
-# your agents reach Reason's cloud agents, and the Reason CLI installs and updates this engine. Without it, a team
-# link and no account. Never asked when joining with a link, for agents, or for updates.
+# Starting fresh in a terminal: Reason's setup, the same as `curl -fsSL https://reasonmachines.com/install.sh | bash -s
+# -- network`. You sign in to Reason in your browser, create or join a network there, and this computer's coding agents
+# are set up; it ends with the invite line. Reason's CLI then installs and updates this engine. Never asked when joining
+# with a link, for agents, or for updates.
 if [ $# -eq 0 ] && [ -z "${REASON_NETWORK_NO_PROMPT:-}" ] && [ ! -e "$bin_dir/reason-network" ] && (exec </dev/tty) 2>/dev/null; then
-  say "Use your Reason account? Your workspace becomes the team, no links to pass around."
-  printf 'Answer n for no account and a team link. [Y/n] '
+  say "Reason Network: sign in to Reason in your browser (free: Google, GitHub, Apple or email), then create or join a network."
+  printf 'Use your Reason account? [Y/n] '
   read -r answer </dev/tty || answer=n
   case "$answer" in
     [nN]*) ;;
     *)
-      reason="$(command -v reason || true)"
-      if [ -z "$reason" ]; then
-        installer="$(curl -fsSL https://reasonmachines.com/install.sh)" && printf '%s\n' "$installer" | bash -s -- --minimal --no-login ||
-          die "installing Reason failed; run this again and answer n to go without an account"
-        reason="${REASON_INSTALL_DIR:-${ARA_INSTALL_DIR:-$HOME/.local/bin}}/reason"
-        [ -x "$reason" ] || die "Reason installed, but not at $reason; run: reason network"
-      fi
-      exec "$reason" network </dev/tty
+      installer="$(curl -fsSL https://reasonmachines.com/install.sh)" || die "couldn't reach reasonmachines.com; try again"
+      exec bash -c "$installer" install.sh network </dev/tty
       ;;
   esac
 fi
@@ -101,7 +98,7 @@ esac
 rm -rf "$tmp"
 trap - EXIT INT TERM
 
-# Hand over to reason-network: it asks a few questions (name, invite code, which agents) in your terminal. Under
+# Hand over to reason-network: on its own (without Reason sign-in), it asks a few questions in your terminal. Under
 # `curl | sh` our stdin is the script, so read answers from the terminal itself when there is one.
 # (In a subshell: in dash, Ubuntu's sh, a failed redirection on `:` would end the whole script.)
 if [ -z "${REASON_NETWORK_NO_PROMPT:-}" ] && (exec </dev/tty) 2>/dev/null; then
