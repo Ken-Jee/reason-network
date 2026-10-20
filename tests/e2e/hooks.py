@@ -238,6 +238,22 @@ while time.time() < deadline and "while listing was down" not in open(reason_log
     time.sleep(0.5)
 check("…and the mail held for it goes in once a listing shows it again",
       back and "while listing was down" in open(reason_log).read(), open(reason_log).read()[-300:])
+# Held after failed listings, then its Reason is switched off: once listings succeed again and leave it out, it is
+# forgotten too, no longer shown offline nor taking mail.
+open(list_fails, "w").close()
+held = reason_listed(False, 60) and "fix-flaky-billing-reason" in run("who", "--all")
+with open(listing_file, "w") as f:
+    json.dump({"items": listing["items"][1:]}, f)
+os.remove(list_fails)
+deadline = time.time() + 45
+while time.time() < deadline and "fix-flaky-billing-reason" in run("who", "--all"):
+    time.sleep(1)
+out = run("who", "--all")
+sent = run("send", "fix-flaky-billing-reason", "reason: after its Reason left the network")
+check("a held Reason session whose Reason left the network is forgotten at the next listing",
+      held and "fix-flaky-billing-reason" not in out and "no session called" in sent, out + sent)
+with open(listing_file, "w") as f:
+    json.dump(listing, f)
 
 # A Claude session that was open before Reason Network was set up: no restart needed. It's on the team at once, gets
 # messages through its own socket, and replies with the CLI.

@@ -186,7 +186,29 @@ impl Daemon {
             }
         }
         self.drop_reason_sessions(&seen, Some(&listing_ok));
+        self.forget_held(&listing_ok);
         Ok(())
+    }
+
+    /// After a listing (`listed`, the ids it returned): forgets the Reason sessions held here, off the network since
+    /// listing failed or another computer took over, that it left out (their Reason left the network, or they ended),
+    /// with the mail they never read, so they no longer show offline or take mail for a day.
+    fn forget_held(&self, listed: &HashSet<String>) {
+        let g = self.inner.lock().unwrap();
+        let held = g.store.sessions_of("reason").unwrap_or_default();
+        let gone: Vec<String> = held
+            .into_iter()
+            .filter(|r| !g.live.contains_key(&r.key))
+            .filter(|r| r.key.strip_prefix("reason:").is_some_and(|id| forgets(Some(listed), id)))
+            .map(|r| r.name)
+            .collect();
+        for name in &gone {
+            let _ = g.store.forget_session(name, &self.person);
+        }
+        drop(g);
+        if !gone.is_empty() {
+            self.presence_changed();
+        }
     }
 
     /// Takes the Reason sessions here that aren't in `keep` off the network now. With the ids a listing just returned

@@ -258,6 +258,14 @@ impl Store {
         Ok(self.db.query_row(&sql, [name], remembered).optional()?)
     }
 
+    /// The sessions remembered for `agent`, live or not.
+    pub fn sessions_of(&self, agent: &str) -> Result<Vec<Remembered>> {
+        let mut st =
+            self.db.prepare_cached(&format!("SELECT {SESSION_COLS} FROM sessions WHERE agent = ?1 ORDER BY name"))?;
+        let rows = st.query_map([agent], remembered)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn sessions(&self) -> Result<Vec<Remembered>> {
         let mut st = self.db.prepare_cached(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY name"))?;
         let rows = st.query_map([], remembered)?;
@@ -299,6 +307,29 @@ fn remembered(r: &Row) -> rusqlite::Result<Remembered> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessions_of_lists_one_agents_sessions() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let session = |name: &str, agent: &str| Remembered {
+            name: name.into(),
+            key: format!("{agent}:{name}"),
+            agent: agent.into(),
+            cwd: "~".into(),
+            repo: None,
+            branch: None,
+            doing: None,
+            tier: Tier::Push,
+            last_seen: 0,
+        };
+        for s in
+            [session("billing-reason", "reason"), session("api-claude", "claude-code"), session("ops-reason", "reason")]
+        {
+            store.upsert_session(&s).unwrap();
+        }
+        let names: Vec<String> = store.sessions_of("reason").unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["billing-reason", "ops-reason"]);
+    }
 
     #[test]
     fn a_session_gone_a_day_is_forgotten_with_the_mail_it_never_read() {

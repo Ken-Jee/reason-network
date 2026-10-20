@@ -42,6 +42,10 @@ struct Cand {
     live: bool,
     repo: Option<String>,
     place: Place,
+    /// Its agent, where known (a remote's offline names don't say).
+    agent: Option<String>,
+    /// The machine's key.
+    endpoint: EndpointId,
 }
 
 enum Place {
@@ -280,6 +284,7 @@ impl Daemon {
     fn candidates(&self, g: &super::Inner, remotes: &HashMap<EndpointId, Remote>) -> Vec<Cand> {
         let mut out = Vec::new();
         let live: HashSet<&str> = g.live.values().map(|l| l.name.as_str()).collect();
+        let me = self.key.public();
         for l in g.live.values() {
             out.push(Cand {
                 person: self.person.clone(),
@@ -288,6 +293,8 @@ impl Daemon {
                 live: true,
                 repo: l.git.repo.clone(),
                 place: Place::Local(Some(l.reg.key.clone())),
+                agent: Some(l.reg.agent.clone()),
+                endpoint: me,
             });
         }
         for r in g.store.sessions().unwrap_or_default().into_iter().filter(|r| !live.contains(r.name.as_str())) {
@@ -298,6 +305,8 @@ impl Daemon {
                 live: false,
                 repo: r.repo,
                 place: Place::Local(None),
+                agent: Some(r.agent),
+                endpoint: me,
             });
         }
         let Some(team) = &g.team else { return out };
@@ -312,6 +321,8 @@ impl Daemon {
                     live: rem.online && s.tier != Tier::None,
                     repo: s.repo.clone(),
                     place: Place::Remote(*id, rem.online),
+                    agent: Some(s.agent.clone()),
+                    endpoint: *id,
                 });
             }
             for n in rem.presence.known.iter().filter(|n| !names.contains(n.as_str())) {
@@ -322,6 +333,8 @@ impl Daemon {
                     live: false,
                     repo: None,
                     place: Place::Remote(*id, rem.online),
+                    agent: None,
+                    endpoint: *id,
                 });
             }
         }
@@ -419,14 +432,61 @@ impl Daemon {
                  receive)."
             ),
             [one] => Ok(vec![target(one)]),
-            many => {
-                let opts: Vec<String> = many.iter().map(|c| format!("{}/{}@{}", c.person, c.name, c.machine)).collect();
-                bail!("'{spec}' is ambiguous: {}", opts.join(", "))
-            }
+            many => match same_reason_session(many) {
+                Some(one) => Ok(vec![target(one)]),
+                None => {
+                    let opts: Vec<String> =
+                        many.iter().map(|c| format!("{}/{}@{}", c.person, c.name, c.machine)).collect();
+                    bail!("'{spec}' is ambiguous: {}", opts.join(", "))
+                }
+            },
         }
     }
 }
 
+/// One person's Reason session under one name on two of their computers (for the round they find out which of them
+/// lists it, reason.rs): the one on the computer whose key sorts first, which keeps it, rather than an ambiguous name.
+fn same_reason_session<'a>(many: &[&&'a Cand]) -> Option<&'a Cand> {
+    let first = many.first()?;
+    let same = many.iter().all(|c| c.agent.as_deref() == Some("reason") && c.person == first.person);
+    same.then(|| many.iter().min_by_key(|c| c.endpoint).map(|c| **c)).flatten()
+}
+
 fn claude_match(c: &ClaudeSession, reg: &SessionReg) -> bool {
     (reg.agent_session_id.is_some() && c.session_id == reg.agent_session_id) || reg.pid == Some(c.pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+
+    fn cand(person: &str, agent: Option<&str>, endpoint: EndpointId) -> Cand {
+        Cand {
+            person: person.into(),
+            name: "billing-reason".into(),
+            machine: endpoint.fmt_short().to_string(),
+            live: true,
+            repo: None,
+            place: Place::Remote(endpoint, true),
+            agent: agent.map(str::to_string),
+            endpoint,
+        }
+    }
+
+    #[test]
+    fn one_persons_reason_session_on_two_computers_resolves_to_the_first_key() {
+        let mut keys: Vec<EndpointId> = (0..2).map(|_| SecretKey::generate().public()).collect();
+        keys.sort();
+        let (a, b) = (cand("alex", Some("reason"), keys[1]), cand("alex", Some("reason"), keys[0]));
+        let pick = same_reason_session(&[&&a, &&b]).expect("one of them");
+        assert_eq!(pick.endpoint, keys[0]);
+        // Anything else under one name stays ambiguous: another agent, another person, or a name with no agent known.
+        let claude = cand("alex", Some("claude-code"), keys[0]);
+        assert!(same_reason_session(&[&&a, &&claude]).is_none());
+        let sam = cand("sam", Some("reason"), keys[0]);
+        assert!(same_reason_session(&[&&a, &&sam]).is_none());
+        let unknown = cand("alex", None, keys[0]);
+        assert!(same_reason_session(&[&&a, &&unknown]).is_none());
+    }
 }
