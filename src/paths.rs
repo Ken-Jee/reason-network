@@ -224,6 +224,11 @@ pub fn log() -> PathBuf {
     home().join("daemon.log")
 }
 
+/// Files that came with messages, one folder per message.
+pub fn inbox() -> PathBuf {
+    home().join("inbox")
+}
+
 pub fn lock() -> PathBuf {
     home().join("daemon.lock")
 }

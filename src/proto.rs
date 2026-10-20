@@ -112,6 +112,9 @@ pub enum Request {
         /// Also pop it up on the person's screen. With it, `to` may be your own user.
         #[serde(default)]
         notify: bool,
+        /// Small text files carried in the message (the client reads them from the sender's paths).
+        #[serde(default)]
+        files: Vec<Attachment>,
     },
     /// A session's unread messages. With `peek` nothing is marked read: the client acknowledges with `Delivered`
     /// after showing the messages, so nothing is lost if it goes away first.
@@ -308,6 +311,22 @@ pub struct Message {
     /// A person's signed answer to the request this replies to (`ask_user` with `about`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Box<crate::team::Signed<Approval>>>,
+    /// Small text files that came with it. An engine from before files drops this field, so a sender only puts it on
+    /// a message for a machine whose presence says it takes files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<Attachment>,
+}
+
+/// A small text file carried in a message.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    /// The text: on the wire, in the outbox and while held. Empty once it is saved in the recipient's inbox folder.
+    #[serde(default)]
+    pub content: String,
+    /// Where it is saved on this computer: only in what the daemon tells its own clients, never taken from a peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

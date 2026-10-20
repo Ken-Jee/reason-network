@@ -159,6 +159,18 @@ machine's mailbox under the session name, for a day: a session gone longer is fo
 read (not the person's own `listen` mailboxes, such as `terminal`, nor mail held for them; and nothing in the
 hours after the daemon starts, while live sessions register again).
 
+**Files.** A message can carry small text files (`files: [{name, content}]`, at most 10, 256 KB each, 512 KB in all;
+valid UTF-8 without NUL bytes), inside the same envelope, so they are as authenticated as its text. The sender's
+client reads them from paths on its computer; both daemons hold them to the limits and reduce each name to a plain
+file name (no separators or `..`, no leading dot or dash, nothing invisible or reserved, at most 100 characters,
+distinct within the message, defanged like message text). The receiver saves them in
+`<state home>/inbox/<message id>/` (folder 0700, files 0600, never executable, never opened) and the message lists
+their paths. A held message's files are saved only once it is approved; a refused one's never are. They go with
+their message: when it is forgotten, or a day after it was read. A machine's presence lists `features: ["files"]`
+when its engine takes them; an older engine would drop the field without a word, so for a machine that doesn't say
+so, the files are written out in the text as fenced blocks when that fits the 64 KB body limit, and the message is
+refused for that recipient otherwise.
+
 Later (M4): an **anchor** is just a member daemon on an always-on box (VPS, Pi) with `role=anchor` that
 also holds mail for offline machines and keeps searchable team history. Same binary, no special server.
 
@@ -214,7 +226,8 @@ Three tools, none of which an agent has to call unless it wants to message someo
 
 - `list_team(filter?, all?)`: the directory, grouped by person then machine. One line per session: name,
   agent, status and for how long, repo@branch, `doing`, tier. Marks `← you`.
-- `send_message(to, message, reply_to?, notify?)`: returns per-recipient state (`delivered` / `queued` /
+- `send_message(to, message, reply_to?, notify?, files?)`: `files` are paths of small text files to carry (see
+  Files above). Returns per-recipient state (`delivered` / `queued` /
   `held`) and tier, e.g. "queued: alice/web-cursor is idle and turn-only, it sees this when alice next
   prompts it". (`reason-network send --fyi` doesn't wake: read at the next natural pause.) `notify` also pops it up on
   the person's screen, for an approval or decision only they can make: osascript on macOS, notify-send on Linux,

@@ -322,6 +322,49 @@ out = cli("alex", "send", "alice/work-codex", "reply while you wait")
 t.join()
 check("long-poll returns the message that arrives", "reply while you wait" in waited.get("out", ""), waited)
 
+# --- small text files ---
+FILES = os.path.join(D, "files")
+os.makedirs(FILES, exist_ok=True)
+def write(name, data):
+    path = os.path.join(FILES, name)
+    with open(path, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+    return path
+def inbox(who):
+    p = os.path.join(H[who], "inbox")
+    return sorted(os.listdir(p)) if os.path.isdir(p) else []
+def saved(out, who):
+    """The file paths a message lists, if each is in `who`'s inbox folder, readable and not executable."""
+    paths = re.findall(r"^- (/.+)$", out, re.M)
+    ok = all(p.startswith(os.path.join(H[who], "inbox") + os.sep) and os.path.isfile(p) and not os.stat(p).st_mode & 0o111
+             for p in paths)
+    return paths if ok else []
+notes = write("notes.md", "# Notes\nline two \u2014 caf\u00e9\n")
+config = write("app.json", '{"port": 8080}\n')
+out = cli("alex", "send", "alice/work-codex", "--file", notes, "--file", config, "the notes and the config (e2e test)")
+check("a send with files is accepted", "→ alice/work-codex" in out and "refused" not in out, out)
+out = codex.tool("check_inbox", {}, meta)
+paths = saved(out, "alice")
+check("files arrive in the message, listed by where they are saved",
+      "Files they sent (text, saved on this computer" in out and [os.path.basename(p) for p in paths] == ["notes.md", "app.json"], out)
+check("…with the same text, readable and not executable",
+      len(paths) == 2 and open(paths[0], encoding="utf-8").read() == "# Notes\nline two \u2014 caf\u00e9\n" and open(paths[1]).read() == '{"port": 8080}\n', paths)
+with open(os.path.join(D, "work", "reply.md"), "w") as f:
+    f.write("relative paths are from the agent's folder\n")
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "a file back (e2e test)", "files": ["reply.md"]}, meta)
+check("an agent sends a file by a path relative to its folder", "→ alex/terminal" in out and "refused" not in out, out)
+out = cli("alex", "listen", "--as", "terminal", "--wait", "5")
+paths = saved(out, "alex")
+check("…and it lands on the other machine", len(paths) == 1 and open(paths[0]).read().startswith("relative paths"), out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [write("logo.png", b"\x89PNG\r\n\x1a\n\x00\x00")]}, meta)
+check("a binary file is refused, saying why", "looks like a binary file" in out and "only text files" in out and "→" not in out, out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [write("big.log", "x" * (256 * 1024 + 1))]}, meta)
+check("a file over 256 KB is refused", "a file can be at most 256 KB" in out and "→" not in out, out)
+out = codex.tool("send_message", {"to": "alex/terminal", "message": "x", "files": [notes] * 11}, meta)
+check("more than 10 files are refused", "at most 10" in out and "→" not in out, out)
+out = cli("alex", "send", "alice/work-codex", "--file", FILES, "x")
+check("a folder is not a file", "is not a file" in out, out)
+
 # --- Codex hooks: session via hooks, delivery via codex queue ---
 start = hook("alice", "codex", "session-start", {"session_id": "22222222-bbbb", "cwd": ROOT, "hook_event_name": "SessionStart"})
 codex_name = os.path.basename(ROOT).lower() + "-codex"
@@ -344,15 +387,33 @@ cli("alice", "stop")
 time.sleep(3)
 cli("alice", "team")
 time.sleep(5)
-out = cli("alex", "send", "alice/work-codex", "held message")
+before = inbox("alice")
+out = cli("alex", "send", "alice/work-codex", "--file", notes, "held message")
 check("message to alice is held by her policy", "held until alice approves" in out, out)
 out = codex.tool("check_inbox", {}, meta)
 check("held message is not delivered", "held message" not in out, out)
+check("…and its files aren't saved yet", inbox("alice") == before, inbox("alice"))
 out = cli("alice", "held")
-check("Reason Network held lists it", "held message" in out, out)
+check("Reason Network held lists it", "held message" in out and "notes.md (saved once approved)" in out, out)
 cli("alice", "approve", "--all")
 out = codex.tool("check_inbox", {}, meta)
 check("approved message is delivered", "held message" in out, out)
+check("…with its files saved now", [os.path.basename(p) for p in saved(out, "alice")] == ["notes.md"], out)
+# Refused: nothing of it is kept.
+text = open(cfg).read()
+open(cfg, "w").write(text.replace('alex = "hold"', 'alex = "refuse"'))
+cli("alice", "stop")
+time.sleep(3)
+cli("alice", "team")
+time.sleep(5)
+before = inbox("alice")
+out = cli("alex", "send", "alice/work-codex", "--file", notes, "refused message")
+check("a refused message's files are never saved", "doesn't accept messages from alex" in out and inbox("alice") == before, out)
+open(cfg, "w").write(text)
+cli("alice", "stop")
+time.sleep(3)
+cli("alice", "team")
+time.sleep(5)
 
 # --- offline machine: outbox ---
 codex.close()

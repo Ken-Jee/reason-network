@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod daemon;
 mod doing;
+mod files;
 mod git;
 mod hook;
 mod invite;
@@ -149,6 +150,9 @@ enum Cmd {
         /// Send as this agent session here (e.g. one made with `listen --as <name>`)
         #[arg(long)]
         from: Option<String>,
+        /// A text file to send with it (repeat for more): at most 10, 256 KB each, 512 KB in all
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<String>,
     },
     /// Set what the current agent session is doing (run from inside the agent's shell)
     Status {
@@ -388,7 +392,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 print!("{}", render::directory(&d, false, render::Paint::terminal()));
             }
         }
-        Cmd::Send { to, message, reply_to, fyi, notify, from } => {
+        Cmd::Send { to, message, reply_to, fyi, notify, from, files } => {
             let mut body = message.join(" ");
             if message.is_empty() || body == "-" {
                 body.clear();
@@ -397,6 +401,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             if body.trim().is_empty() {
                 bail!("empty message");
             }
+            let files = files::read(&files, &std::env::current_dir()?)?;
             // Messages come from agent sessions: `--from`'s, this agent's, or from a plain terminal, `<you>/terminal`.
             // An agent shell Reason Network doesn't know (its tools aren't loaded) counts as a terminal.
             let send = |from: String| Request::Send {
@@ -406,6 +411,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 reply_to: reply_to.clone(),
                 wake: !fyi,
                 notify,
+                files: files.clone(),
             };
             // As the terminal, a group send has to come from a person sitting at it, not an agent's shell or a script.
             let as_terminal = || {
