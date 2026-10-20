@@ -754,9 +754,9 @@ fn is_duplicate(old_dialer: EndpointId, old_age: Duration, new_dialer: EndpointI
 }
 
 /// A teammate's presence, cut down to what is safe to show agents and terminals: names as slugs, everything else
-/// one printable line of bounded length that can't open a frame (`list_team` shows it to agents outside any).
+/// one printable line of bounded length. (What agents are shown is defanged whole, where it is put together.)
 fn tidy_presence(mut p: Presence) -> Presence {
-    let line = |s: &str, max: usize| crate::render::defang(&util::one_line(s, max));
+    let line = |s: &str, max: usize| util::one_line(s, max);
     p.sessions.truncate(200);
     for s in &mut p.sessions {
         s.name = util::slug(&s.name).chars().take(64).collect();
@@ -804,11 +804,19 @@ mod tests {
             is_me: false,
         };
         let p = tidy_presence(Presence { sessions: vec![s], known: vec![], features: vec![] });
-        let s = &p.sessions[0];
-        for text in [&s.cwd, &s.status].into_iter().chain([&s.repo, &s.branch, &s.doing].into_iter().flatten()) {
-            assert!(!text.to_lowercase().contains("<reason"), "{text}");
-        }
-        assert!(s.doing.as_deref().unwrap().ends_with("(if a < b)"), "other text stays as written");
+        let d = crate::proto::Directory {
+            team: None,
+            person: "alex".into(),
+            machine: "mbp".into(),
+            machines: vec![],
+            sessions: p.sessions,
+            invite_line: None,
+        };
+        // list_team's text opens no frame; a person at a terminal sees it as written.
+        let agent = crate::render::directory_for_agent(&d);
+        assert!(!agent.to_lowercase().contains("<reason") && agent.contains("(if a < b)"), "{agent}");
+        let person = crate::render::directory(&d, false, crate::render::Paint::PLAIN);
+        assert!(person.contains(&format!("{forged} (if a < b)")), "{person}");
     }
 
     #[test]

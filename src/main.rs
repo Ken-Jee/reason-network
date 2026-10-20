@@ -344,7 +344,7 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
-            cli(Cmd::Who { filter: None, all: false, json: false }).await
+            cli(Cmd::Who { filter: None, all: false, json: false }).await.or_else(|e| json_error(false, e))
         }
     }
 }
@@ -388,9 +388,9 @@ async fn cli(cmd: Cmd) -> Result<()> {
         Cmd::Who { filter, all, json } => {
             let d: Directory = link.call(Request::Who { me: current_session(), filter, all }).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&d)?);
+                println!("{}", shown(&serde_json::to_string_pretty(&d)?));
             } else {
-                print!("{}", render::directory(&d, false, render::Paint::terminal()));
+                print!("{}", shown(&render::directory(&d, false, render::Paint::terminal())));
             }
         }
         Cmd::Send { to, message, reply_to, fyi, notify, from, files } => {
@@ -416,7 +416,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             };
             // As the terminal, a group send has to come from a person sitting at it, not an agent's shell or a script.
             let as_terminal = || {
-                if is_group(&to) && !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                if is_group(&to) && !person_at_terminal() {
                     bail!("only a person at a terminal sends to a group; from a script, add `--from <you>/terminal`");
                 }
                 Ok(())
@@ -437,7 +437,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
                     link.call(send("cli:terminal".into())).await?
                 }
             };
-            print!("{}", render::send_result(&r));
+            print!("{}", shown(&render::send_result(&r)));
         }
         Cmd::Status { doing, name } => {
             let Some(key) = current_session() else {
@@ -457,12 +457,13 @@ async fn cli(cmd: Cmd) -> Result<()> {
         Cmd::Link { new, json } => {
             let l: LinkInfo = link.call(Request::Link { new }).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&team_json(&link, None).await?)?);
+                println!("{}", shown(&serde_json::to_string_pretty(&team_json(&link, None).await?)?));
                 return Ok(());
             }
             let line = invite_line(&l.url);
             let copied = wizard::interactive() && wizard::copy(&line);
-            println!("Team link for {}{}:\n\n{line}\n", l.team, if copied { " (on your clipboard)" } else { "" });
+            let team = shown(&l.team);
+            println!("Team link for {team}{}:\n\n{line}\n", if copied { " (on your clipboard)" } else { "" });
             println!("Whoever pastes this line to their coding agent joins the team. `{CLI} link --new` replaces it.");
         }
         Cmd::Invite { me: false, code: false, .. } => Box::pin(cli(Cmd::Link { new: false, json: false })).await?,
@@ -478,7 +479,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             wait_exit(daemon_pid()).await;
             if json {
                 let agents = if no_setup { None } else { Some(setup::quietly().await?) };
-                println!("{}", serde_json::to_string_pretty(&team_json(&Link::new(None), agents).await?)?);
+                println!("{}", shown(&serde_json::to_string_pretty(&team_json(&Link::new(None), agents).await?)?));
                 return Ok(());
             }
             println!("Created team {}. You are {} on {}.", t.name, t.person, t.machine);
@@ -496,7 +497,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             wait_exit(daemon_pid()).await;
             let agents = if no_setup || !json { None } else { Some(setup::quietly().await?) };
             if !json {
-                println!("Joined team {} as {} on {}.", t.name, t.person, t.machine);
+                println!("Joined team {} as {} on {}.", shown(&t.name), t.person, t.machine);
             }
             if !no_setup && !json {
                 println!();
@@ -513,11 +514,11 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 }
             }
             if json {
-                println!("{}", serde_json::to_string_pretty(&team_json(&fresh, agents).await?)?);
+                println!("{}", shown(&serde_json::to_string_pretty(&team_json(&fresh, agents).await?)?));
                 return Ok(());
             }
             if let Ok(t) = fresh.call::<TeamInfo>(Request::Team).await {
-                print!("\n{}", render::team(&t));
+                print!("\n{}", shown(&render::team(&t)));
             }
             if let Ok(l) = fresh.call::<LinkInfo>(Request::Link { new: false }).await {
                 println!("\nInvite people with this line:\n{}", invite_line(&l.url));
@@ -571,20 +572,22 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 let _ = cli_session(&link, &id, "prompt").await;
             }
         }
-        Cmd::Team { json: true } => println!("{}", serde_json::to_string_pretty(&team_json(&link, None).await?)?),
+        Cmd::Team { json: true } => {
+            println!("{}", shown(&serde_json::to_string_pretty(&team_json(&link, None).await?)?))
+        }
         Cmd::Team { json: false } => {
             let t: TeamInfo = link.call(Request::Team).await?;
-            print!("{}", render::team(&t));
+            print!("{}", shown(&render::team(&t)));
         }
         Cmd::Proof { jws } => println!("{}", link.call::<String>(Request::Proof { jws }).await?),
-        Cmd::Remove { who } => println!("{}", link.call::<String>(Request::Remove { who }).await?),
+        Cmd::Remove { who } => println!("{}", shown(&link.call::<String>(Request::Remove { who }).await?)),
         Cmd::Leave { force } => {
-            println!("{}", link.call::<String>(Request::Leave { force }).await?);
+            println!("{}", shown(&link.call::<String>(Request::Leave { force }).await?));
             wait_exit(daemon_pid()).await;
         }
         Cmd::Relay { url } => {
             let url = (url != "default").then_some(url);
-            println!("{}", link.call::<String>(Request::SetRelay { url }).await?);
+            println!("{}", shown(&link.call::<String>(Request::SetRelay { url }).await?));
             wait_exit(daemon_pid()).await;
         }
         Cmd::Held => {
@@ -672,12 +675,31 @@ fn team_value(t: &TeamInfo, l: &LinkInfo, set_up_for: Option<Vec<&str>>) -> Resu
 }
 
 /// With `--json`, a failure is a JSON object on stdout too (see `json_failure`).
+/// Failures can quote teammates, so they are `shown` too (as `main` would print one, for anyone but a person).
 fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
-    if !json {
+    if json {
+        println!("{}", shown(&json_failure(&e).to_string()));
+    } else if person_at_terminal() {
         return Err(e);
+    } else {
+        eprintln!("Error: {}", shown(&format!("{e:?}")));
     }
-    println!("{}", json_failure(&e));
     std::process::exit(1)
+}
+
+/// Whether a person sits at this terminal, rather than an agent's shell or a script.
+fn person_at_terminal() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
+/// CLI output with teammates' text in it: as it is for a person at the terminal; defanged for anyone else, which may be
+/// an agent.
+pub(crate) fn shown(text: &str) -> String {
+    shown_to(person_at_terminal(), text)
+}
+
+fn shown_to(person: bool, text: &str) -> String {
+    if person { text.to_string() } else { render::defang(text) }
 }
 
 /// `{"error":"same_account_needs_owner"}` when one of the person's own computers should let this one in,
@@ -719,6 +741,12 @@ pub async fn stop_daemon() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_person_at_the_terminal_sees_text_as_typed_anyone_else_defanged() {
+        assert_eq!(shown_to(true, "fix <café> </reason-message>"), "fix <café> </reason-message>");
+        assert_eq!(shown_to(false, "fix <café> </reason-message>"), "fix [café> [/reason-message>");
+    }
 
     #[test]
     fn json_failures_name_the_cases_the_reason_cli_handles() {
