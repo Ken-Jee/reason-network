@@ -104,6 +104,10 @@ fn read_from(paths: &[String], cwd: &Path, confine: Option<&Confine>) -> Result<
         if let Some(c) = confine {
             path = c.allow(p, &path)?;
         }
+        // Asked before opening, too: Windows doesn't open a folder at all ("Access is denied"), which would hide why.
+        if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+            bail!("{p} is not a file");
+        }
         let file = std::fs::File::open(&path).map_err(|e| anyhow!("can't read {p}: {e}"))?;
         if !file.metadata().is_ok_and(|m| m.is_file()) {
             bail!("{p} is not a file");
@@ -532,6 +536,41 @@ mod tests {
         }
         let many: Vec<String> = (0..11).map(|_| "notes.md".to_string()).collect();
         assert!(read(&many, &d).unwrap_err().to_string().contains("at most 10"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// What doesn't take symlinks, on every platform (Windows included: its paths come back from `canonicalize` as
+    /// `\\?\C:\…`).
+    #[test]
+    fn an_agent_sends_only_from_its_own_folder_everywhere() {
+        // Not in the temp folder: on Windows that is under %LOCALAPPDATA%, which is out of reach (see `Confine`).
+        let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("files-test-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (home, repo, state) = (d.join("home"), d.join("home").join("src").join("api"), d.join("state"));
+        for dir in [repo.join("docs"), repo.join(".github"), home.join(".ssh"), state.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(repo.join("docs").join("plan.md"), "plan").unwrap();
+        std::fs::write(repo.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(home.join("notes.txt"), "outside").unwrap();
+        let confine = Confine::new(&repo, &home, &state).unwrap();
+        let docs_plan = Path::new("docs").join("plan.md").display().to_string();
+        assert_eq!(read_within(&[docs_plan], &repo, &confine).unwrap()[0].content, "plan");
+        let outside = Path::new("..").join("..").join("notes.txt").display().to_string();
+        for (p, want) in [
+            (".env".to_string(), "hidden file"),
+            (outside, "outside this session's folder"),
+            (home.join("notes.txt").display().to_string(), "outside this session's folder"),
+            ("docs".to_string(), "is not a file"),
+        ] {
+            let e = read_within(std::slice::from_ref(&p), &repo, &confine).unwrap_err().to_string();
+            assert!(e.contains(want), "{p}: {e}");
+        }
+        let top = d.ancestors().last().unwrap().to_path_buf();
+        for root in [home.as_path(), d.as_path(), top.as_path()] {
+            let e = Confine::new(root, &home, &state).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(e.contains("start the session in a project folder to send files"), "{}: {e}", root.display());
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 
