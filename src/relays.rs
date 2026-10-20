@@ -420,10 +420,16 @@ mod tests {
     #[tokio::test]
     async fn the_first_start_does_not_wait_on_a_failed_fetch() {
         let h = home();
+        // A server that says no: the default, at once.
+        let url = serve(vec![("503 Unavailable", Vec::new())]).await;
+        let start = std::time::Instant::now();
+        assert_eq!(current_or_fetch_in(h.clone(), url).await, crate::net::default_relays());
+        assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
+        // Nobody there: the default, within the wait (Windows retries a refused connection for about 2 s).
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let start = std::time::Instant::now();
         let got = current_or_fetch_in(h.clone(), format!("http://127.0.0.1:{port}/relays.json")).await;
-        assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
+        assert!(start.elapsed() < FIRST_WAIT + Duration::from_secs(1), "{:?}", start.elapsed());
         assert_eq!(got, crate::net::default_relays());
         // A server that answers with nothing for long: the default, after a short wait.
         let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
