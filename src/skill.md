@@ -9,6 +9,12 @@ Reason Network connects coding agents across a team's machines. Every session on
 live directory, and any of them can message another. Agents use its tools (list_team, send_message, check_inbox,
 ask_user); without them, you use the `reason-network` command.
 
+## Joining
+
+To join, or to set up Reason Network on a computer, follow https://reasonmachines.com/network: your user signs in
+there, and gets their network and its invite line, `Join the Reason Network: <link>`, which anyone pastes to their agent
+to join.
+
 ## Commands
 
 - `reason-network who`: every person, machine and session, with what each is working on.

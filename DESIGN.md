@@ -132,9 +132,10 @@ that was removed while away is first sent the state that says so; strangers lear
 team id, the team link's secret, the inviting machine's relay and LAN address hints, and up to six members' keys.
 The link secret is a reusable invite in the team state (any member can show the link and any online member can
 redeem it), replaced with `reason-network link --new` and whenever someone is removed; removed machines are never sent it.
-The page shows one command (`curl … install.sh | sh -s -- <ticket>`); the joiner only types a name. Four-word
-one-time codes (`reason-network invite --code`, ~41 bits) derive a temporary iroh key the inviting machine listens on, for
-reading out loud or adding your own machines. A code can't show the joiner which team answers it (whoever listens on
+It travels as the invite line, `Join the Reason Network: <team link>`, which the joiner pastes to their agent: they
+sign in with Reason, and their computer joins with a sign-in proof (see below). Four-word one-time codes
+(`reason-network invite --code`, ~41 bits) derive a temporary iroh key the inviting machine listens on, for joining
+without signing in. A code can't show the joiner which team answers it (whoever listens on
 the code's key knows the code, so could make up a team), so a sign-in never joins with one: only with a link, which
 names the team. Links are `rn1-…` (older builds wrote `tincan1…`, with the same payload; both are read). After `init`
 and `join` the CLI prints the invite line, `Join the Reason Network: <team link>`, and agents get it from `list_team`.
@@ -323,18 +324,21 @@ not approve. Nothing changes how an agent works when it isn't messaging.
 ## Install UX (M3)
 
 ```sh
-curl -fsSL https://…/install.sh | sh        # asks: sign in with Reason (the Reason CLI), or no account
-reason-network init vibes --as alex         # no account: the first person creates the team
-reason-network invite                       # prints: reason-network join cm1…
-reason-network join cm1… --as alice         # friends: joins, installs the service, wires up agents
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network                 # sign in, create or join a network
+curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<link>'   # join with an invite link
 ```
 
-With Reason, `reason network` does all of it: the workspace is the team.
+Or paste `Join the Reason Network: https://reasonmachines.com/network` (or an invite line) to a coding agent. The
+Reason CLI's `reason network` signs the person in in their browser, where they create a network or join one, then runs
+this engine's `init` or `join` with `--proof`, sets up the agents, and prints the invite line. Hosted assistants add
+the MCP server `https://mcp.reasonmachines.com/mcp`. On its own, without signing in (names unverified), the engine
+still installs from this repo's releases and runs `reason-network init <name> --as <you>` or
+`reason-network join '<link>' --as <you>`.
 
 `join`/`init` run `setup`, which detects installed agents and wires each one (backing up every file it
 edits): Claude Code plugin or `claude mcp add --scope user` + hooks, `~/.codex/config.toml` + `hooks.json`,
 `~/.cursor/mcp.json` + `hooks.json`, `~/.gemini/settings.json`, opencode plugin + MCP, Copilot
-`mcp-config.json` + hooks, `~/.grok/config.toml` + `hooks/reason-network.json`. Or paste one line into any agent: "install Reason Network and join cm1…".
+`mcp-config.json` + hooks, `~/.grok/config.toml` + `hooks/reason-network.json`. Or paste the invite line into any agent.
 
 ## Milestones
 

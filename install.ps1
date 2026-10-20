@@ -1,4 +1,4 @@
-# Installs Reason Network on its own (no account needed) for Windows. In PowerShell:
+# Installs the Reason Network engine on its own for Windows (without Reason sign-in: names aren't verified). In PowerShell:
 #
 #   irm <this url> | iex                                                  install, then set up (start or join a team)
 #   & ([scriptblock]::Create((irm <this url>))) <team link>               install, then join that team
@@ -63,7 +63,7 @@
     Write-Host "Added $bin to your PATH (open a new terminal to use it there)."
   }
 
-  # Hand over to reason-network: it asks a few questions (name, invite code, which agents) when there's someone to ask.
+  # Hand over to reason-network: it asks a few questions (your name, start or join, which agents) when there's someone to ask.
   if ($args.Count -eq 0) {
     if ($env:REASON_NETWORK_NO_PROMPT -or [Console]::IsInputRedirected) { Write-Host ''; Write-Host 'Next, in a terminal: reason-network'; return }
     & $exe

@@ -252,12 +252,9 @@ pub async fn show_link(new: bool) -> Result<String> {
     note(
         title,
         format!(
-            "Send it to your friends: one paste and their name, and they're in.\nIt works for everyone until `{CLI} link --new`."
+            "Send it as the invite line, Join the Reason Network: <link>: whoever pastes it to their agent joins.\nIt works for everyone until `{CLI} link --new`."
         ),
     )?;
-    if crate::managed() {
-        log::info("Teammates in your Reason workspace just run `reason network`; the link is for anyone else.")?;
-    }
     Ok(l.url)
 }
 

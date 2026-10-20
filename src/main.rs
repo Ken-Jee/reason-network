@@ -74,7 +74,7 @@ impl std::fmt::Display for Engine {
     }
 }
 
-/// The one line that installs Reason Network on its own (no account needed) and runs `reason-network <args>`: for
+/// The one line that installs this engine on its own (without signing in to Reason) and runs `reason-network <args>`: for
 /// macOS and Linux, and for Windows.
 pub fn install_lines(args: &str) -> [String; 2] {
     let base = format!("https://github.com/{REPO}/releases/latest/download");
@@ -463,10 +463,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             let line = invite_line(&l.url);
             let copied = wizard::interactive() && wizard::copy(&line);
             println!("Team link for {}{}:\n\n{line}\n", l.team, if copied { " (on your clipboard)" } else { "" });
-            println!("Anyone with it can join: it opens a page with one command. `{CLI} link --new` replaces it.");
-            if managed() {
-                println!("Teammates in your Reason workspace just run `reason network`; the link is for anyone else.");
-            }
+            println!("Whoever pastes this line to their coding agent joins the team. `{CLI} link --new` replaces it.");
         }
         Cmd::Invite { me: false, code: false, .. } => Box::pin(cli(Cmd::Link { new: false, json: false })).await?,
         Cmd::Setup { dry_run: false, remove: false, no_service: false } if wizard::interactive() => {
@@ -529,12 +526,16 @@ async fn cli(cmd: Cmd) -> Result<()> {
         Cmd::Invite { me, hours, .. } => {
             let i: InviteInfo = link.call(Request::Invite { me, hours: hours.clamp(1, 24 * 30) }).await?;
             let who = if me { "another machine of yours" } else { "a teammate" };
-            println!("Invite code for {who}: {}\n", i.code);
+            println!("One-time code for {who}: {}\n", i.code);
             let [unix, windows] = install_lines(&i.code);
-            if managed() && !me {
-                println!("Teammates in your Reason workspace just run `reason network`. Anyone else:\n");
+            if !me {
+                println!(
+                    "To invite people, the invite line is better: `{CLI} link` gives it (Join the Reason Network: <link>).\n"
+                );
             }
-            println!("They run this, which installs Reason Network (no account needed) and joins the team:\n");
+            println!(
+                "With the code, they run this, which installs the Reason Network engine and joins (their name unverified):\n"
+            );
             println!("  {unix}\n");
             println!("On Windows, in PowerShell:\n\n  {windows}\n");
             println!(
