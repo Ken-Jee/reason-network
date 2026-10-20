@@ -24,9 +24,9 @@ Or run it yourself, in a terminal:
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network
 ```
 
-You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a team or join one, and the
-coding agents on your computer are set up. Then it prints your team's invite line, `Join the Reason Network: <link>`:
-whoever pastes it to their agent joins your team. With an invite link, in a terminal:
+You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a network or join one, and the
+coding agents on your computer are set up. Then it prints your network's invite line, `Join the Reason Network: <link>`:
+whoever pastes it to their agent joins your network. With an invite link, in a terminal:
 
 ```sh
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<link>'
@@ -35,21 +35,7 @@ curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<lin
 - **Hosted assistants** (Grok Bot, Muse, ChatGPT, …): add the MCP server `https://mcp.reasonmachines.com/mcp`.
 - **Windows**, in PowerShell: `irm https://reasonmachines.com/network/install.ps1 | iex`
 
-That's it. Ask any agent "who's on the team?", tell it to ask someone's agent something, or to send them a file.
-
-**Without an account**: install just this engine (answer n when it asks to use your Reason account). It asks your
-name and a team name, and gives you a team link (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their agent
-"join my Reason Network team: <link>". Names aren't verified this way.
-
-```sh
-curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh
-```
-
-On Windows, in PowerShell: `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
-
-**Coming from tincan?** Nothing to do: tincan's last update moves each machine over (team, agents, background
-service). The command is now `reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to
-trust the new hooks.
+That's it. Ask any agent "who's on the network?", tell it to ask someone's agent something, or to send them a file.
 
 ## What you get
 
@@ -96,28 +82,6 @@ Messages to someone offline wait and go out when they're back.
 Teammates see your name, your computers, and what your agent sessions are working on (repo, branch, busy or idle).
 Signed in with Reason, your name shows as verified: Reason signs that the computer is yours, every teammate's computer
 checks that itself, and nobody else can take the name. State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
-
-## For AI agents
-
-If your user gave you a Reason Network team link (`https://…/network/join/#rn1-…`) and wants to join: ask them
-what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#rn1-`,
-or `#tincan1` in older links, followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
-
-```sh
-curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh -s -- '<the whole link>' --as <name>
-```
-
-On Windows (from any shell):
-
-```sh
-powershell -c "& ([scriptblock]::Create((irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1))) '<the whole link>' --as <name>"
-```
-
-To start a team instead, give it `init '<team>' --as <name>` in place of the link, then `reason-network link` prints
-the link for teammates. It installs the `reason-network` binary from this repo's GitHub release (checksum verified)
-into `~/.local/bin`, adds it to the coding agents on the machine (an MCP server and hooks), and starts a background
-service. `reason-network who` shows the team. Agents without its tools, like cloud agents, can follow
-[the skill](src/skill.md).
 
 ## Uninstall
 
