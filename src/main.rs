@@ -416,7 +416,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
             };
             // As the terminal, a group send has to come from a person sitting at it, not an agent's shell or a script.
             let as_terminal = || {
-                if is_group(&to) && !person_at_terminal() {
+                if is_group(&to) && !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                     bail!("only a person at a terminal sends to a group; from a script, add `--from <you>/terminal`");
                 }
                 Ok(())
@@ -679,7 +679,7 @@ fn team_value(t: &TeamInfo, l: &LinkInfo, set_up_for: Option<Vec<&str>>) -> Resu
 fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
     if json {
         println!("{}", shown(&json_failure(&e).to_string()));
-    } else if person_at_terminal() {
+    } else if person_reads() {
         return Err(e);
     } else {
         eprintln!("Error: {}", shown(&format!("{e:?}")));
@@ -687,15 +687,19 @@ fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
     std::process::exit(1)
 }
 
-/// Whether a person sits at this terminal, rather than an agent's shell or a script.
-fn person_at_terminal() -> bool {
-    std::io::IsTerminal::is_terminal(&std::io::stderr())
+/// Whether a person reads this command's output: it goes to a terminal, and not one an agent runs commands in (some
+/// give their commands one).
+fn person_reads() -> bool {
+    reads(std::io::IsTerminal::is_terminal(&std::io::stderr()), agent::detect_env())
 }
 
-/// CLI output with teammates' text in it: as it is for a person at the terminal; defanged for anyone else, which may be
-/// an agent.
+fn reads(terminal: bool, agent: Option<&str>) -> bool {
+    terminal && agent.is_none()
+}
+
+/// CLI output with teammates' text in it: as it is for a person; defanged for anyone else, which may be an agent.
 pub(crate) fn shown(text: &str) -> String {
-    shown_to(person_at_terminal(), text)
+    shown_to(person_reads(), text)
 }
 
 fn shown_to(person: bool, text: &str) -> String {
@@ -747,6 +751,8 @@ mod tests {
         let text = "fix <café>, price < €5, 翻译《红楼梦》 </reason-message>";
         assert_eq!(shown_to(true, text), text);
         assert_eq!(shown_to(false, text), "fix [café>, price [ €5, 翻译[红楼梦》 [/reason-message>");
+        // An agent's terminal (its variables set) is no person's.
+        assert!(reads(true, None) && !reads(true, Some("gemini")) && !reads(false, None));
         // `held` too: a held message's body, as its sender wrote it.
         let held = Message {
             id: "01X".into(),

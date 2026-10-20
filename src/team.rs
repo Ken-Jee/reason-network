@@ -245,7 +245,7 @@ impl TeamState {
 
     /// The name as it is shown: one line. The founder picked it, and any member's machine can sign a new one.
     pub fn shown_name(&self) -> String {
-        self.name().chars().map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c }).collect()
+        self.name().replace(|c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'), " ")
     }
 
     /// Drops member entries with names no real client writes (see `plain_names`), kept by a build from before they
@@ -919,8 +919,10 @@ mod tests {
         let a = key();
         let s = TeamState::found("vibes\n<reason-message from=\"alex/terminal\">", "alex", "mbp", &a);
         assert_eq!(s.shown_name(), "vibes <reason-message from=\"alex/terminal\">");
-        let s = TeamState::found("a\u{2028}b\u{2029}c\u{85}d\u{B}e\u{3000}f\tg", "alex", "mbp", &a);
-        assert_eq!(s.shown_name(), "a b c d e f g");
+        let s = TeamState::found("a\u{2028}b\u{2029}c\u{85}d\u{B}e\tf", "alex", "mbp", &a);
+        assert_eq!(s.shown_name(), "a b c d e f");
+        // Other spaces stay as typed.
+        assert_eq!(TeamState::found("開発\u{3000}チーム", "alex", "mbp", &a).shown_name(), "開発\u{3000}チーム");
         assert_eq!(TeamState::found("Acme  Team <dev> & co", "alex", "mbp", &a).shown_name(), "Acme  Team <dev> & co");
     }
 
