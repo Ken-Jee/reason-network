@@ -215,6 +215,7 @@ impl Daemon {
             person,
             machine: self.machine.clone(),
             machines: Vec::new(),
+            features: vec![crate::files::FEATURE.into()],
         })
     }
 
@@ -311,6 +312,7 @@ impl Daemon {
             person: person.clone(),
             machine: self.machine.clone(),
             machines: Vec::new(),
+            features: vec![crate::files::FEATURE.into()],
         };
         {
             let mut g = self.inner.lock().unwrap();
@@ -449,6 +451,7 @@ impl Daemon {
             person: self.person.clone(),
             machine: self.machine.clone(),
             machines: self.machines(),
+            features: vec![crate::files::FEATURE.into()],
         })
     }
 
