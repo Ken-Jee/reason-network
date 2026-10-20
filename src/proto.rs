@@ -323,9 +323,13 @@ pub struct MachineInfo {
     pub link: Option<String>,
     pub rtt_ms: Option<u64>,
     pub last_seen: Option<i64>,
-    /// The person's name is verified: a machine of theirs carries a Reason sign-in proof for it.
+    /// The person is verified (it's per person, the same on each of their machines): a machine of theirs carries a
+    /// Reason sign-in proof for their name, good now.
     #[serde(default)]
     pub verified: bool,
+    /// This machine carries such a proof itself.
+    #[serde(default)]
+    pub has_proof: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

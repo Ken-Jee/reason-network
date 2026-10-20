@@ -102,6 +102,10 @@ pub struct TeamState {
     pub attestations: BTreeMap<String, String>,
 }
 
+/// A join refused because one of the person's own computers should let this one in (another computer of the same
+/// Reason account): the joiner asks the ticket's other machines.
+pub const SAME_ACCOUNT: &str = "same_account_needs_owner";
+
 /// Entries stamped further ahead than this are refused (a broken clock, or worse).
 const MAX_SKEW_MS: i64 = 86_400_000;
 
@@ -171,13 +175,22 @@ impl TeamState {
     }
 
     /// Whether `endpoint` may be an active machine of `person`, on `signer`'s word: one of the person's machines vouches
-    /// for it, nobody else has the name, or Reason says it belongs to the account the name is verified for.
+    /// for it, nobody else has the name, or Reason says it belongs to the account that holds the name.
     fn may_take(&self, person: &str, endpoint: &EndpointId, signer: &EndpointId) -> bool {
         self.active().any(|m| m.endpoint == *signer && m.person == person)
             || !self.active().any(|m| m.person == person && m.endpoint != *endpoint)
-            || self
-                .proof(endpoint)
-                .is_some_and(|p| p.name == person && self.verified_people().get(person) == Some(&p.sub))
+            || self.signed_proof(endpoint).is_some_and(|p| self.same_account(person, &p, endpoint))
+    }
+
+    /// Whether `p` (the proof of `endpoint`) is for `person`, and from the Reason account another of `person`'s machines
+    /// holds the name with. Expiry doesn't count here: who holds a name mustn't change as time passes.
+    pub fn same_account(&self, person: &str, p: &Proof, endpoint: &EndpointId) -> bool {
+        p.name == person
+            && self.active().any(|m| {
+                m.person == person
+                    && m.endpoint != *endpoint
+                    && self.signed_proof(&m.endpoint).is_some_and(|q| q.name == person && q.sub == p.sub)
+            })
     }
 
     /// The machine's sign-in proof, if it has one that verifies now.
@@ -185,7 +198,18 @@ impl TeamState {
         proof::verify(self.attestations.get(&endpoint.to_string())?, endpoint).ok()
     }
 
-    /// Verified people: each name an active machine's proof is for, with the Reason account it belongs to.
+    /// The machine's sign-in proof, expired or not.
+    fn signed_proof(&self, endpoint: &EndpointId) -> Option<Proof> {
+        proof::verify_ignoring_expiry(self.attestations.get(&endpoint.to_string())?, endpoint).ok()
+    }
+
+    /// Whether the machine carries a proof, good now, for the name it goes by.
+    pub fn has_proof(&self, endpoint: &EndpointId) -> bool {
+        self.member(endpoint).is_some_and(|m| self.proof(endpoint).is_some_and(|p| p.name == m.person))
+    }
+
+    /// Verified people: each name an active machine has a proof for, good now, with the Reason account it belongs to.
+    /// It's per person: all of a verified person's machines show as theirs.
     pub fn verified_people(&self) -> HashMap<String, String> {
         self.active()
             .filter_map(|m| self.proof(&m.endpoint).filter(|p| p.name == m.person))
@@ -193,10 +217,11 @@ impl TeamState {
             .collect()
     }
 
-    /// Records `endpoint`'s sign-in proof, if it verifies and is newer than the one it has; true if it was taken.
+    /// Records `endpoint`'s sign-in proof, if it is Reason's (expired or not) and newer than the one it has; true if it
+    /// was taken.
     pub fn attest(&mut self, endpoint: &EndpointId, jws: &str) -> bool {
-        let Ok(p) = proof::verify(jws, endpoint) else { return false };
-        if self.proof(endpoint).is_some_and(|cur| cur.iat >= p.iat) {
+        let Ok(p) = proof::verify_ignoring_expiry(jws, endpoint) else { return false };
+        if self.signed_proof(endpoint).is_some_and(|cur| cur.iat >= p.iat) {
             return false;
         }
         self.attestations.insert(endpoint.to_string(), jws.trim().to_string());
@@ -284,7 +309,8 @@ impl TeamState {
     }
 
     /// Checks that `secret` admits `person` (with the joiner's verified sign-in proof, if any), and marks the invite
-    /// used by `joiner`.
+    /// used by `joiner`. `owner_only`: another computer of the account holding the name is let in only by one of that
+    /// person's machines (which every build takes), not on its proof (which builds before proofs don't).
     pub fn redeem(
         &mut self,
         key: &SecretKey,
@@ -292,6 +318,7 @@ impl TeamState {
         person: &str,
         joiner: EndpointId,
         proof: Option<&Proof>,
+        owner_only: bool,
     ) -> Result<()> {
         let h = hash(secret);
         let signed = self.invites.get(&h).ok_or_else(|| anyhow!("unknown invite"))?;
@@ -319,8 +346,12 @@ impl TeamState {
                 bail!("only one of {p}'s machines can let this one in; try again while one is online")
             }
             Some(_) => {}
-            // Another computer of the account the name is verified for may join under it.
-            None if proof.is_some_and(|p| p.name == person && self.verified_people().get(person) == Some(&p.sub)) => {}
+            // Another computer of the account that holds the name may join under it.
+            None if proof.is_some_and(|p| self.same_account(person, p, &joiner)) => {
+                if owner_only && self.member(&key.public()).is_none_or(|m| m.person != person) {
+                    bail!("only one of {person}'s own computers lets this one in as {person} ({SAME_ACCOUNT})")
+                }
+            }
             None if self.active().any(|m| m.person == person && m.endpoint != joiner) => {
                 bail!("'{person}' is already in this team; join with another name (--as)")
             }
@@ -339,13 +370,15 @@ impl TeamState {
             bail!("state from a different team");
         }
         let mut changed = false;
-        // Proofs check themselves; they come before members, whose names they can vouch for (`may_take`).
+        // Proofs check themselves; they come before members, whose names they can vouch for (`may_take`). Only
+        // members' are kept (see the end).
+        let proofs_before = self.attestations.clone();
         for (k, jws) in &other.attestations {
             if let Ok(id) = k.parse::<EndpointId>()
+                && (self.members.contains_key(k) || other.members.contains_key(k))
                 && self.attestations.get(k) != Some(jws)
-                && self.attest(&id, jws)
             {
-                changed = true;
+                self.attest(&id, jws);
             }
         }
         // Then admissions: they decide who may sign everything else. One admission can vouch for the signer of
@@ -431,7 +464,8 @@ impl TeamState {
                 changed = true;
             }
         }
-        Ok(changed)
+        self.attestations.retain(|k, _| self.members.contains_key(k));
+        Ok(changed || self.attestations != proofs_before)
     }
 
     /// Validates a state received from a stranger (the join reply): every entry must trace back to the founder.
@@ -678,17 +712,17 @@ mod tests {
         sa.invite(&a, &secret, 24, None);
 
         // b joins through a: a redeems and adds b; b verifies what it receives.
-        sa.redeem(&a, &secret, "alice", b.public(), None).unwrap();
+        sa.redeem(&a, &secret, "alice", b.public(), None, false).unwrap();
         sa.put_member(&a, b.public(), "alice", "xps", true);
         let mut sb = TeamState::verified(&sa).unwrap();
         assert_eq!(sb, sa);
         assert!(sb.is_active(&b.public()));
-        assert!(sa.redeem(&a, &secret, "eve", c.public(), None).is_err(), "invites are single use");
+        assert!(sa.redeem(&a, &secret, "eve", c.public(), None, false).is_err(), "invites are single use");
 
         // b invites c; a learns about c by merging b's copy.
         let s2 = random_secret();
         sb.invite(&b, &s2, 1, None);
-        sb.redeem(&b, &s2, "sam", c.public(), None).unwrap();
+        sb.redeem(&b, &s2, "sam", c.public(), None, false).unwrap();
         sb.put_member(&b, c.public(), "sam", "nuc", true);
         assert!(sa.merge(&sb).unwrap());
         assert!(sa.is_active(&c.public()));
@@ -738,7 +772,7 @@ mod tests {
         s.put_member(&f, f.public(), "alex", "mbp", false); // founder leaves
         let secret = random_secret();
         s.invite(&b, &secret, 24, None);
-        s.redeem(&b, &secret, "sam", d.public(), None).unwrap();
+        s.redeem(&b, &secret, "sam", d.public(), None, false).unwrap();
         s.put_member(&b, d.public(), "sam", "nuc", true);
         let sd = TeamState::verified(&s).unwrap();
         assert!(sd.is_active(&d.public()) && sd.is_active(&b.public()) && !sd.is_active(&f.public()));
@@ -763,7 +797,7 @@ mod tests {
         // A newcomer sees the same, including c (admitted by b, who is gone now).
         let secret = random_secret();
         x.invite(&f, &secret, 24, None);
-        x.redeem(&f, &secret, "dee", d.public(), None).unwrap();
+        x.redeem(&f, &secret, "dee", d.public(), None, false).unwrap();
         x.put_member(&f, d.public(), "dee", "pi", true);
         let z = TeamState::verified(&x).unwrap();
         assert!(z.is_active(&c.public()) && !z.is_active(&b.public()));
@@ -789,14 +823,20 @@ mod tests {
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let first = random_secret();
         s.invite(&a, &first, 24, None);
-        s.redeem(&a, &first, "alice", b.public(), None).unwrap();
+        s.redeem(&a, &first, "alice", b.public(), None, false).unwrap();
         s.put_member(&a, b.public(), "alice", "xps", true);
-        assert!(s.redeem(&a, &first, "alice", b.public(), None).is_ok(), "a retry by the same machine is fine");
+        assert!(s.redeem(&a, &first, "alice", b.public(), None, false).is_ok(), "a retry by the same machine is fine");
         let from_b = random_secret();
         s.invite(&b, &from_b, 720, None);
         s.put_member(&a, b.public(), "alice", "xps", false);
-        assert!(s.redeem(&a, &first, "alice", b.public(), None).is_err(), "removed: the old invite doesn't readmit");
-        assert!(s.redeem(&a, &from_b, "sam", c.public(), None).is_err(), "invites by a removed machine are dead");
+        assert!(
+            s.redeem(&a, &first, "alice", b.public(), None, false).is_err(),
+            "removed: the old invite doesn't readmit"
+        );
+        assert!(
+            s.redeem(&a, &from_b, "sam", c.public(), None, false).is_err(),
+            "invites by a removed machine are dead"
+        );
     }
 
     #[test]
@@ -818,11 +858,11 @@ mod tests {
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let open = random_secret();
         s.invite(&a, &open, 24, None);
-        assert!(s.redeem(&a, &open, "alex", b.public(), None).is_err());
+        assert!(s.redeem(&a, &open, "alex", b.public(), None, false).is_err());
         let mine = random_secret();
         s.invite(&a, &mine, 24, Some("alex".into()));
-        assert!(s.redeem(&a, &mine, "alice", b.public(), None).is_err());
-        s.redeem(&a, &mine, "alex", b.public(), None).unwrap();
+        assert!(s.redeem(&a, &mine, "alice", b.public(), None, false).is_err());
+        s.redeem(&a, &mine, "alex", b.public(), None, false).unwrap();
     }
 
     #[test]
@@ -830,7 +870,7 @@ mod tests {
         let (a, b, fake, mine) = (key(), key(), key(), key());
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let link = s.link_secret().unwrap().to_string();
-        s.redeem(&a, &link, "alice", b.public(), None).unwrap();
+        s.redeem(&a, &link, "alice", b.public(), None, false).unwrap();
         s.put_member(&a, b.public(), "alice", "xps", true);
         // alice's machine signs a new machine in as alex, on its copy, and sends it over.
         let mut evil = s.clone();
@@ -906,20 +946,20 @@ mod tests {
         let (a, b, c, d) = (key(), key(), key(), key());
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let link = s.link_secret().unwrap().to_string();
-        s.redeem(&a, &link, "alice", b.public(), None).unwrap();
+        s.redeem(&a, &link, "alice", b.public(), None, false).unwrap();
         s.put_member(&a, b.public(), "alice", "xps", true);
-        s.redeem(&a, &link, "sam", c.public(), None).unwrap();
+        s.redeem(&a, &link, "sam", c.public(), None, false).unwrap();
         s.put_member(&a, c.public(), "sam", "nuc", true);
-        assert!(s.redeem(&a, &link, "alice", d.public(), None).is_err(), "names stay unique");
+        assert!(s.redeem(&a, &link, "alice", d.public(), None, false).is_err(), "names stay unique");
         // A joiner learns the link, and can show it too.
         let joined = TeamState::verified(&s).unwrap();
         assert_eq!(joined.link_secret(), Some(link.as_str()));
         assert_eq!(s.without_secrets().link, None);
         assert!(s.without_secrets().invites.is_empty());
         s.new_link(&b);
-        assert!(s.redeem(&a, &link, "dee", d.public(), None).is_err(), "the old link stops working");
+        assert!(s.redeem(&a, &link, "dee", d.public(), None, false).is_err(), "the old link stops working");
         let fresh = s.link_secret().unwrap().to_string();
-        s.redeem(&a, &fresh, "dee", d.public(), None).unwrap();
+        s.redeem(&a, &fresh, "dee", d.public(), None, false).unwrap();
     }
 
     #[test]
@@ -1010,13 +1050,13 @@ mod tests {
         let link = s.link_secret().unwrap().to_string();
         let p = |sub: &str, name: &str, k: &SecretKey| crate::proof::verify(&proof(sub, name, k), &k.public()).unwrap();
         // Another account, or no proof, can't take it.
-        let err = s.redeem(&a, &link, "alex", b.public(), Some(&p("u_mallory", "alex", &b))).unwrap_err();
+        let err = s.redeem(&a, &link, "alex", b.public(), Some(&p("u_mallory", "alex", &b)), false).unwrap_err();
         assert!(err.to_string().contains("already in this team"), "{err}");
-        assert!(s.redeem(&a, &link, "alex", b.public(), None).is_err());
+        assert!(s.redeem(&a, &link, "alex", b.public(), None, false).is_err());
         // Another computer of the same account can, through the team link, let in by anyone.
-        s.redeem(&a, &link, "alice", c.public(), None).unwrap();
+        s.redeem(&a, &link, "alice", c.public(), None, false).unwrap();
         s.put_member(&a, c.public(), "alice", "xps", true);
-        s.redeem(&c, &link, "alex", d.public(), Some(&p("u_alex", "alex", &d))).unwrap();
+        s.redeem(&c, &link, "alex", d.public(), Some(&p("u_alex", "alex", &d)), false).unwrap();
         s.attest(&d.public(), &proof("u_alex", "alex", &d));
         s.put_member(&c, d.public(), "alex", "mini", true);
         let peer = TeamState::verified(&s).unwrap();
@@ -1027,7 +1067,90 @@ mod tests {
         assert!(!TeamState::verified(&forged).unwrap().is_active(&d.public()));
         // A name nobody verified stays with whoever has it, proof or not.
         let e = key();
-        let err = s.redeem(&a, &link, "alice", e.public(), Some(&p("u_alice", "alice", &e))).unwrap_err();
+        let err = s.redeem(&a, &link, "alice", e.public(), Some(&p("u_alice", "alice", &e)), false).unwrap_err();
         assert!(err.to_string().contains("already in this team"), "{err}");
+    }
+
+    /// A proof as Reason signs it, expiring `ttl` seconds from now (in the past when negative).
+    fn proof_for(sub: &str, name: &str, k: &SecretKey, ttl: i64) -> String {
+        let mut c = crate::proof::tests::claims(sub, name, &k.public());
+        c["exp"] = serde_json::json!(util::now_ms() / 1000 + ttl);
+        crate::proof::tests::sign_with(
+            &crate::proof::tests::signer(),
+            serde_json::json!({"alg": "EdDSA", "kid": crate::proof::tests::KID, "typ": "reason-network-proof"}),
+            c,
+        )
+    }
+
+    #[test]
+    fn who_holds_a_name_doesnt_change_when_proofs_expire() {
+        let (a, c, d) = (key(), key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        // Both of alex's proofs have run out: that only takes the "verified" mark away.
+        assert!(s.attest(&a.public(), &proof_for("u_alex", "alex", &a, -10)));
+        let link = s.link_secret().unwrap().to_string();
+        s.redeem(&a, &link, "alice", c.public(), None, false).unwrap();
+        s.put_member(&a, c.public(), "alice", "xps", true);
+        let jws = proof_for("u_alex", "alex", &d, -10);
+        let pd = crate::proof::verify_ignoring_expiry(&jws, &d.public()).unwrap();
+        s.redeem(&c, &link, "alex", d.public(), Some(&pd), false).unwrap();
+        assert!(s.attest(&d.public(), &jws));
+        s.put_member(&c, d.public(), "alex", "mini", true);
+        let newcomer = TeamState::verified(&s).unwrap();
+        assert!(newcomer.is_active(&d.public()), "a newcomer keeps alex's second computer, as everyone else does");
+        assert!(newcomer.verified_people().is_empty() && !newcomer.has_proof(&a.public()));
+        // Someone else's expired proof still doesn't take the name.
+        let m = key();
+        let pm = crate::proof::verify_ignoring_expiry(&proof_for("u_mallory", "alex", &m, -10), &m.public()).unwrap();
+        assert!(s.redeem(&c, &link, "alex", m.public(), Some(&pm), false).is_err());
+    }
+
+    #[test]
+    fn another_computer_of_the_account_asks_for_one_of_its_own_machines() {
+        let (a, c, d) = (key(), key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        s.attest(&a.public(), &proof("u_alex", "alex", &a));
+        let link = s.link_secret().unwrap().to_string();
+        s.redeem(&a, &link, "alice", c.public(), None, false).unwrap();
+        s.put_member(&a, c.public(), "alice", "xps", true);
+        let pd = crate::proof::verify(&proof("u_alex", "alex", &d), &d.public()).unwrap();
+        // alice's machine isn't alex's: it says so, distinctly (not "taken"), for the joiner to ask the next machine.
+        let err = s.redeem(&c, &link, "alex", d.public(), Some(&pd), true).unwrap_err().to_string();
+        assert!(err.contains(SAME_ACCOUNT) && !err.contains("already in this team"), "{err}");
+        // alex's machine lets it in, which takes no proof for peers to accept: builds before proofs take it too.
+        s.redeem(&a, &link, "alex", d.public(), Some(&pd), true).unwrap();
+        s.put_member(&a, d.public(), "alex", "mini", true);
+        assert!(TeamState::verified(&s).unwrap().is_active(&d.public()));
+        // Another account's proof is plain taken, whoever is asked.
+        let m = key();
+        let pm = crate::proof::verify(&proof("u_mallory", "alex", &m), &m.public()).unwrap();
+        let err = s.redeem(&c, &link, "alex", m.public(), Some(&pm), true).unwrap_err().to_string();
+        assert!(err.contains("already in this team") && !err.contains(SAME_ACCOUNT), "{err}");
+    }
+
+    #[test]
+    fn proofs_are_kept_only_for_members() {
+        let (a, stranger) = (key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        let mut other = s.clone();
+        other.attestations.insert(stranger.public().to_string(), proof("u_x", "x", &stranger));
+        assert!(!s.merge(&other).unwrap(), "nothing to take");
+        assert!(s.attestations.is_empty());
+        // Nor kept for a member entry that didn't verify.
+        let mut forged = s.clone();
+        forged.put_member(&stranger, stranger.public(), "x", "evil", true);
+        forged.attestations.insert(stranger.public().to_string(), proof("u_x", "x", &stranger));
+        assert!(!s.merge(&forged).unwrap());
+        assert!(s.attestations.is_empty());
+    }
+
+    #[test]
+    fn has_proof_is_per_machine_verified_per_person() {
+        let (a, b) = (key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        s.attest(&a.public(), &proof("u_alex", "alex", &a));
+        s.put_member(&a, b.public(), "alex", "mini", true);
+        assert!(s.has_proof(&a.public()) && !s.has_proof(&b.public()));
+        assert!(s.verified_people().contains_key("alex"), "alex is verified, on both machines");
     }
 }

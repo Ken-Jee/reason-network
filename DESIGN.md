@@ -116,20 +116,29 @@ The link secret is a reusable invite in the team state (any member can show the 
 redeem it), replaced with `reason-network link --new` and whenever someone is removed; removed machines are never sent it.
 The page shows one command (`curl … install.sh | sh -s -- <ticket>`); the joiner only types a name. Four-word
 one-time codes (`reason-network invite --code`, ~41 bits) derive a temporary iroh key the inviting machine listens on, for
-reading out loud or adding your own machines. A code doesn't name the team, so the joiner checks the team it is handed
-holds the code's invite, signed by a member and used by the joiner. Links are `rn1-…` (older builds wrote `tincan1…`,
-with the same payload; both are read). After `init` and `join` the CLI prints the invite line,
-`Join the Reason Network: <team link>`, and agents get it from `list_team`.
+reading out loud or adding your own machines. A code can't show the joiner which team answers it (whoever listens on
+the code's key knows the code, so could make up a team), so a sign-in never joins with one: only with a link, which
+names the team. Links are `rn1-…` (older builds wrote `tincan1…`, with the same payload; both are read). After `init`
+and `join` the CLI prints the invite line, `Join the Reason Network: <team link>`, and agents get it from `list_team`.
 
 **Sign-in proofs.** Signed in with Reason, a machine carries a proof: a compact JWS (Ed25519) from Reason saying
-this endpoint id belongs to account `sub`, named `name`, until `exp` (`init`/`join --proof`, `reason-network proof`
-to refresh). The engine checks it against Reason's public keys, compiled in, and never calls Reason. Proofs travel in
-the team state's `attestations` (endpoint → JWS), outside the signed entries, so builds without them pass the rest
-on unchanged; each machine checks every proof itself and drops the ones that don't verify. A person whose machine
-has a valid proof for their name shows as verified. With a proof, the name is the proof's; a verified name can't be
-taken by anyone but another computer of the same account (which any member may let in through the team link).
-`--json` on `init`, `join`, `link` and `team` is for the Reason CLI, which signs people in; a taken name is
-`{"error":"name_taken"}`.
+this endpoint id belongs to account `sub`, named `name`, issued `iat`, until `exp` (`init`/`join --proof`,
+`reason-network proof` to refresh). The engine checks it against Reason's public keys, compiled in, and never calls
+Reason; debug builds also trust the keys in `REASON_NETWORK_TRUST_KEYS`, for tests, and release builds don't. A proof
+longer than 4 KB, or issued more than a day ahead, is refused. Proofs travel in the team state's `attestations`
+(endpoint → JWS), outside the signed entries, so builds without them pass the rest on unchanged; each machine checks
+every proof itself, drops the ones that don't verify, and keeps them only for members.
+
+`verified` is per person: a person shows as verified while a machine of theirs has a proof for their name that hasn't
+expired. `has_proof` is per machine. Expiry decides only that mark, never membership: who may hold a name goes by
+Reason's signature alone, so it doesn't change as time passes or differ between machines' clocks. With a proof, the
+name is the proof's. A name held with a proof can't be taken by anyone else (`{"error":"name_taken"}` with `--json`,
+for the Reason CLI, which signs people in). Another computer of the same account may take it: the joiner first asks the
+link's machines for one of that person's own, whose word every build takes (a machine that isn't says
+`same_account_needs_owner` and the joiner asks the next); if none of them is online, a machine of this build lets it
+in on its proof; if none can, the join fails with `{"error":"same_account_needs_owner"}`, never `name_taken`. Builds
+before proofs (0.10.x) never see a computer let in on its proof, only one let in by the person's own machine. If every
+machine asked is that old, nothing tells the joiner it's the same account, and the join comes back as `name_taken`.
 
 **Presence and directory.** Daemons keep a connection to every online member (full mesh; fine to ~50
 machines). On connect they exchange roster heads (anti-entropy) and full presence. On any local change a

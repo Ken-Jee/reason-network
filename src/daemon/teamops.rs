@@ -145,8 +145,8 @@ impl Daemon {
 
     /// Someone presented an invite (on the join protocol).
     pub fn redeem(self: &Arc<Self>, joiner: EndpointId, req: &JoinRequest) -> Result<TeamState> {
-        // Signed in to Reason: the name is the one Reason gave.
-        let proof = req.proof.as_deref().map(|p| proof::verify(p, &joiner)).transpose()?;
+        // Signed in to Reason: the name is the one Reason gave. (Expiry doesn't decide who joins: peers don't check it.)
+        let proof = req.proof.as_deref().map(|p| proof::verify_ignoring_expiry(p, &joiner)).transpose()?;
         let person = proof.as_ref().map_or_else(|| util::slug(&req.person), |p| p.name.clone());
         let machine = util::slug(&req.machine);
         if person.is_empty() || machine.is_empty() {
@@ -158,7 +158,7 @@ impl Daemon {
             if !req.team.is_empty() && req.team != team.id {
                 bail!("this invite is for a different team");
             }
-            team.redeem(&self.key, &req.secret, &person, joiner, proof.as_ref())?;
+            team.redeem(&self.key, &req.secret, &person, joiner, proof.as_ref(), req.owner_only)?;
             if let Some(p) = &req.proof {
                 team.attest(&joiner, p);
             }
@@ -227,6 +227,7 @@ impl Daemon {
     ) -> Result<TeamInfo> {
         // A proof that doesn't verify here won't anywhere: say so before leaving anything.
         let checked = proof.as_deref().map(|p| proof::verify(p, &self.key.public())).transpose()?;
+        sign_in_needs_a_link(invite_text, proof.as_deref())?;
         let person = checked.map_or_else(|| person.to_string(), |p| p.name);
         let mut solo = false;
         if let Some(t) = self.team_state() {
@@ -274,16 +275,27 @@ impl Daemon {
         let endpoint = net::bind(self.key.clone(), relay.as_deref(), self.cfg.lan()).await?;
         let req = JoinRequest {
             team: team.clone(),
-            secret: secret.clone(),
+            secret,
             person: person.clone(),
             machine: self.machine.clone(),
             proof: proof.clone(),
+            owner_only: proof.is_some(),
         };
-        let res = net::join(&endpoint, &peers, &req).await;
+        // Another computer of an account that holds a name is best let in by one of that person's own machines, which
+        // every build takes: ask for that first. Else any machine of this build lets it in on its proof.
+        let res = match net::join(&endpoint, &peers, &req).await {
+            Err(e) if e.to_string().contains(team::SAME_ACCOUNT) => {
+                let any = JoinRequest { owner_only: false, ..req };
+                net::join(&endpoint, &peers, &any).await.map_err(|again| if taken(&again) { e } else { again })
+            }
+            r => r,
+        };
         endpoint.close().await;
         let mut state = TeamState::verified(&res?)?;
         let me = self.key.public();
-        if !handed_the_invited_team(&state, &team, &secret, &me) {
+        // A ticket names the team; a code can't (whoever answers on the code's key knows the code, so could make up a
+        // team), which is why a sign-in joins only with a link.
+        if (!team.is_empty() && state.id != team) || !state.is_active(&me) {
             bail!("the team did not add this machine");
         }
         // An inviting machine from before sign-in proofs passes ours over: it goes out with this machine's state.
@@ -453,11 +465,13 @@ impl Daemon {
             rtt_ms: None,
             last_seen: None,
             verified: false,
+            has_proof: false,
         };
         let (Some(team), net) = (self.team_state(), self.net()) else { return vec![here] };
         let verified = team.verified_people();
         let remotes = net.as_ref().map(|n| n.remotes()).unwrap_or_default();
-        let mut out = vec![MachineInfo { verified: verified.contains_key(&here.person), ..here }];
+        let mut out =
+            vec![MachineInfo { verified: verified.contains_key(&here.person), has_proof: team.has_proof(&me), ..here }];
         for m in team.active().filter(|m| m.endpoint != me) {
             let link = net.as_ref().and_then(|n| n.link_info(&m.endpoint));
             out.push(MachineInfo {
@@ -470,6 +484,7 @@ impl Daemon {
                 rtt_ms: link.map(|l| l.rtt_ms),
                 last_seen: remotes.get(&m.endpoint).map(|r| r.last_seen).filter(|t| *t > 0),
                 verified: verified.contains_key(&m.person),
+                has_proof: team.has_proof(&m.endpoint),
             });
         }
         out[1..].sort_by(|a, b| (&a.person, &a.machine).cmp(&(&b.person, &b.machine)));
@@ -594,46 +609,29 @@ impl Daemon {
     }
 }
 
-/// Whether the team a joiner was handed is the one it was invited to: the one a team link names, holding the invite it
-/// presented (for a code, the only thing that names the team), signed by a member, and letting this machine in.
-fn handed_the_invited_team(state: &TeamState, team: &str, secret: &str, me: &EndpointId) -> bool {
-    let invited =
-        state.invites.get(&team::hash(secret)).is_some_and(|i| i.body.reusable || i.body.used_by == Some(*me));
-    (team.is_empty() || state.id == team) && invited && state.is_active(me)
+/// The name is someone else's in the team (as every build says it).
+pub fn taken(e: &anyhow::Error) -> bool {
+    e.to_string().contains("is already in this team")
+}
+
+/// A sign-in proof goes with a team link, never a four-word code: a code can't show the joiner which team answers it.
+fn sign_in_needs_a_link(invite_text: &str, proof: Option<&str>) -> Result<()> {
+    if proof.is_some() && invite::normalize(invite_text).is_some() {
+        bail!("signing in joins a team with its link, not a four-word code: ask for the team link");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::SecretKey;
 
     #[test]
-    fn a_code_joiner_checks_the_team_it_is_handed() {
-        let (a, me) = (SecretKey::generate(), SecretKey::generate());
+    fn a_sign_in_never_joins_with_a_code() {
         let code = invite::generate();
-        let secret = invite::secret(&code);
-        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
-        s.invite(&a, &secret, 24, None);
-        s.redeem(&a, &secret, "sam", me.public(), None).unwrap();
-        s.put_member(&a, me.public(), "sam", "nuc", true);
-        let handed = TeamState::verified(&s).unwrap();
-        assert!(handed_the_invited_team(&handed, "", &secret, &me.public()));
-        assert!(handed_the_invited_team(&handed, &s.id, &secret, &me.public()));
-        assert!(!handed_the_invited_team(&handed, "00112233445566778899aabbccddeeff", &secret, &me.public()));
-        // Some other team, with this machine in it but not the invite (whoever answered on the code's key made it up).
-        let mut other = TeamState::found("not yours", "mallory", "evil", &a);
-        other.put_member(&a, me.public(), "sam", "nuc", true);
-        let other = TeamState::verified(&other).unwrap();
-        assert!(other.is_active(&me.public()));
-        assert!(!handed_the_invited_team(&other, "", &secret, &me.public()), "the code's invite isn't in it");
-        // The invite, but used by another machine.
-        let mut used = TeamState::found("vibes", "alex", "mbp", &a);
-        used.invite(&a, &secret, 24, None);
-        used.redeem(&a, &secret, "eve", SecretKey::generate().public(), None).unwrap();
-        used.put_member(&a, me.public(), "sam", "nuc", true);
-        assert!(!handed_the_invited_team(&TeamState::verified(&used).unwrap(), "", &secret, &me.public()));
-        // A team link's invite is reusable.
-        let link = s.link_secret().unwrap().to_string();
-        assert!(handed_the_invited_team(&handed, &s.id, &link, &me.public()));
+        assert!(sign_in_needs_a_link(&code, Some("jws")).unwrap_err().to_string().contains("not a four-word code"));
+        assert!(sign_in_needs_a_link(&code.replace('-', " "), Some("jws")).is_err());
+        assert!(sign_in_needs_a_link(&code, None).is_ok(), "codes still work without signing in");
+        assert!(sign_in_needs_a_link("https://reasonmachines.com/network/join/#rn1-AAAA", Some("jws")).is_ok());
     }
 }

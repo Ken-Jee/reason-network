@@ -316,7 +316,17 @@ async fn main() -> Result<()> {
             // Don't wait on anything left behind (a stuck stdin read): the agent is waiting on us.
             std::process::exit(0)
         }
-        Some(cmd) => cli(cmd).await,
+        Some(cmd) => {
+            // With --json, every failure is JSON too.
+            let json = matches!(
+                cmd,
+                Cmd::Init { json: true, .. }
+                    | Cmd::Join { json: true, .. }
+                    | Cmd::Link { json: true, .. }
+                    | Cmd::Team { json: true }
+            );
+            cli(cmd).await.or_else(|e| json_error(json, e))
+        }
         // `reason network` alone: get set up if needed, else show who's around.
         None => {
             let in_team = Link::new(None).call::<TeamInfo>(Request::Team).await.is_ok();
@@ -460,7 +470,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
                 bail!("name the team: `{CLI} init <team>` (or run it in a terminal to be asked)")
             };
             let req = Request::CreateTeam { name: team, person: default_person(person), relay, proof };
-            let t: TeamInfo = link.call(req).await.or_else(|e| json_error(json, e))?;
+            let t: TeamInfo = link.call(req).await?;
             wait_exit(daemon_pid()).await;
             if json {
                 let agents = if no_setup { None } else { Some(setup::quietly().await?) };
@@ -478,7 +488,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
         Cmd::Join { invite, person, no_setup, proof, json } => {
             let Some(invite) = invite else { bail!("give the invite code: `{CLI} join <code>`") };
             let req = Request::Join { ticket: invite, person: default_person(person), proof };
-            let t: TeamInfo = link.call(req).await.or_else(|e| json_error(json, e))?;
+            let t: TeamInfo = link.call(req).await?;
             wait_exit(daemon_pid()).await;
             let agents = if no_setup || !json { None } else { Some(setup::quietly().await?) };
             if !json {
@@ -623,13 +633,24 @@ async fn cli(cmd: Cmd) -> Result<()> {
 async fn team_json(link: &std::sync::Arc<Link>, set_up_for: Option<Vec<&str>>) -> Result<serde_json::Value> {
     let t: TeamInfo = link.call(Request::Team).await?;
     let l: LinkInfo = link.call(Request::Link { new: false }).await?;
+    team_value(&t, &l, set_up_for)
+}
+
+fn team_value(t: &TeamInfo, l: &LinkInfo, set_up_for: Option<Vec<&str>>) -> Result<serde_json::Value> {
+    // A daemon from before team ids were in its reply (it was running when this binary was updated).
+    if t.id.is_empty() {
+        bail!(
+            "the Reason Network daemon running is older than this command: restart the Reason Network daemon (`{CLI} stop`)"
+        );
+    }
     let endpoint = t.machines.iter().find(|m| m.is_me).map(|m| m.endpoint.clone()).unwrap_or_default();
     let members: Vec<_> = t
         .machines
         .iter()
         .map(|m| {
             serde_json::json!({"person": m.person, "machine": m.machine, "endpoint": m.endpoint,
-                               "verified": m.verified, "is_me": m.is_me, "online": m.is_me || m.online})
+                               "verified": m.verified, "has_proof": m.has_proof, "is_me": m.is_me,
+                               "online": m.is_me || m.online})
         })
         .collect();
     let mut out = serde_json::json!({
@@ -642,16 +663,28 @@ async fn team_json(link: &std::sync::Arc<Link>, set_up_for: Option<Vec<&str>>) -
     Ok(out)
 }
 
-/// With `--json`, a failure is a JSON object on stdout too: `{"error":"name_taken"}` when the name is someone else's
-/// in the team (the Reason CLI then asks for another), else the message.
+/// With `--json`, a failure is a JSON object on stdout too (see `json_failure`).
 fn json_error<T>(json: bool, e: anyhow::Error) -> Result<T> {
     if !json {
         return Err(e);
     }
-    let msg = format!("{e:#}");
-    let error = if msg.contains("is already in this team") { "name_taken" } else { msg.as_str() };
-    println!("{}", serde_json::json!({ "error": error }));
+    println!("{}", json_failure(&e));
     std::process::exit(1)
+}
+
+/// `{"error":"same_account_needs_owner"}` when one of the person's own computers should let this one in,
+/// `{"error":"name_taken"}` when the name is someone else's in the team (the Reason CLI then asks for another), else the
+/// message.
+fn json_failure(e: &anyhow::Error) -> serde_json::Value {
+    let msg = format!("{e:#}");
+    let error = if msg.contains(team::SAME_ACCOUNT) {
+        team::SAME_ACCOUNT
+    } else if msg.contains("is already in this team") {
+        "name_taken"
+    } else {
+        msg.as_str()
+    };
+    serde_json::json!({ "error": error })
 }
 
 /// The running daemon's pid, from its lock file.
@@ -680,4 +713,64 @@ pub async fn stop_daemon() -> bool {
     let _ = Link::existing().call::<serde_json::Value>(Request::Shutdown).await;
     wait_exit(pid).await;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_failures_name_the_cases_the_reason_cli_handles() {
+        let e = |m: &str| json_failure(&anyhow::anyhow!(m.to_string()));
+        assert_eq!(
+            e("'alex' is already in this team; join with another name (--as)"),
+            serde_json::json!({"error": "name_taken"})
+        );
+        let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
+        assert_eq!(e(same), serde_json::json!({"error": "same_account_needs_owner"}));
+        assert_eq!(
+            e("this sign-in proof expired; sign in again"),
+            serde_json::json!({"error": "this sign-in proof expired; sign in again"})
+        );
+    }
+
+    #[test]
+    fn team_json_needs_a_daemon_that_gives_the_team_id() {
+        let me = MachineInfo {
+            person: "alex".into(),
+            machine: "mbp".into(),
+            endpoint: "ab".repeat(32),
+            is_me: true,
+            online: true,
+            link: None,
+            rtt_ms: None,
+            last_seen: None,
+            verified: true,
+            has_proof: true,
+        };
+        let mut t = TeamInfo {
+            id: String::new(),
+            name: "vibes".into(),
+            team_name: "vibes".into(),
+            relay: None,
+            relay_connected: None,
+            person: "alex".into(),
+            machine: "mbp".into(),
+            machines: vec![me],
+        };
+        let l = LinkInfo { team: "vibes".into(), url: join_url("rn1-AAAA"), ticket: "rn1-AAAA".into() };
+        assert!(team_value(&t, &l, None).unwrap_err().to_string().contains("restart the Reason Network daemon"));
+        t.id = "00112233445566778899aabbccddeeff".into();
+        let v = team_value(&t, &l, Some(vec!["Claude Code"])).unwrap();
+        assert_eq!(
+            (v["team_id"].as_str(), v["team_name"].as_str()),
+            (Some("00112233445566778899aabbccddeeff"), Some("vibes"))
+        );
+        assert_eq!(v["invite_line"], "Join the Reason Network: https://reasonmachines.com/network/join/#rn1-AAAA");
+        assert_eq!(
+            (v["members"][0]["verified"].as_bool(), v["members"][0]["has_proof"].as_bool()),
+            (Some(true), Some(true))
+        );
+        assert_eq!(v["set_up_for"], serde_json::json!(["Claude Code"]));
+    }
 }

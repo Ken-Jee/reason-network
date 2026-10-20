@@ -141,7 +141,8 @@ check("joiner sees alex connected, verified", re.search(r"alex \(verified\)\s+la
 out = cli("alex", "team")
 check("founder sees alice connected, verified", re.search(r"alice \(verified\)\s+desktop\s+(direct|relay)", out) is not None, out)
 j = as_json(cli("alex", "team", "--json"))
-check("team --json marks people verified", [m["verified"] for m in j.get("members", [])] == [True, True] and j.get("link", "").startswith("https://"), j)
+check("team --json marks people verified, and each machine's proof", [(m["verified"], m["has_proof"]) for m in j.get("members", [])] == [(True, True)] * 2
+      and j.get("link", "").startswith("https://") and j.get("team_name") == "vibes" and len(j.get("team_id", "")) == 32, j)
 j = as_json(cli("alex", "link", "--json"))
 check("link --json gives the invite line", j.get("invite_line", "").startswith("Join the Reason Network: https://reasonmachines.com/network/join/#rn1-"), j)
 out = cli("alex", "link")
@@ -165,6 +166,11 @@ _, out = run(mal, "join", link.group(1), "--proof", proof("u_alex", "alex", ep["
 check("someone else's proof is refused", "for another machine" in out and "Joined" not in out, out)
 _, out = run(mal, "init", "x", "--proof", proof("u_mallory", "mallory", mal_ep, aud="reason"), "--no-setup")
 check("init refuses a proof for something else", "isn't from Reason Network" in out and "Created" not in out, out)
+out, both = run(mal, "join", link.group(1), "--proof", "garbage", "--no-setup", "--json")
+check("with --json every failure is JSON", as_json(out) == {"error": "this sign-in proof is damaged"}, both)
+code = re.search(r"Invite code for a teammate: ([a-z]+(?:-[a-z]+){3})", cli("alex", "invite", "--code"))
+_, out = run(mal, "join", code.group(1), "--proof", proof("u_mallory", "mallory", mal_ep), "--no-setup")
+check("a sign-in joins only with a link, never a four-word code", "not a four-word code" in out and "Joined" not in out, out)
 run(mal, "stop")
 check("alex's team still has just the two", len(as_json(cli("alex", "team", "--json")).get("members", [])) == 2)
 # alex signed in on a second computer: the same account takes its name there, let in by anyone's machine.
@@ -172,7 +178,7 @@ mini = dict(env("alex"), REASON_NETWORK_HOME=os.path.join(D, "alex-mini"), REASO
 mini_ep = run(mini, "endpoint")[0]
 alice_link = re.search(r"(https://\S+#rn1-\S+)", cli("alice", "link")).group(1)
 _, out = run(mini, "join", alice_link, "--proof", proof("u_alex", "alex", mini_ep), "--no-setup")
-check("another computer of the same account joins under its verified name", "Joined team vibes as alex on mini." in out, out)
+check("another computer of the same account joins under its verified name (alice's link: alex's machine lets it in)", "Joined team vibes as alex on mini." in out, out)
 check("…and gets the invite line", "Join the Reason Network: https://reasonmachines.com/network/join/#rn1-" in out, out)
 time.sleep(3)
 out = cli("alex", "team")

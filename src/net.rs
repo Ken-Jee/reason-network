@@ -55,7 +55,7 @@ pub struct Presence {
     pub known: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub team: String,
     pub secret: String,
@@ -64,6 +64,10 @@ pub struct JoinRequest {
     /// The joiner's Reason sign-in proof. Builds before proofs ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<String>,
+    /// Let another computer of the account holding the name in only from one of that person's machines (see
+    /// `TeamState::redeem`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner_only: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -194,6 +198,7 @@ async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
 /// Joins a team: asks each machine in turn (the ticket's, or the one an invite code points at) to let us in.
 pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest) -> Result<TeamState> {
     let mut last = anyhow!("the invite lists no machines");
+    let mut refused: Option<String> = None;
     for addr in peers {
         let attempt = || async {
             let conn = endpoint.connect(addr.clone(), JOIN_ALPN).await?;
@@ -217,13 +222,19 @@ pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest
         };
         match reply {
             Ok(Ok(JoinReply::Ok { state })) => return Ok(*state),
-            // A refusal is final: another machine would say the same.
+            // A refusal is final: another machine would say the same. Except, asking for one of the person's own
+            // machines, from a machine that isn't (or an older one, which can't tell): the next may be.
+            Ok(Ok(JoinReply::Err { error })) if req.owner_only => {
+                if refused.as_ref().is_none_or(|r| !r.contains(crate::team::SAME_ACCOUNT)) {
+                    refused = Some(error);
+                }
+            }
             Ok(Ok(JoinReply::Err { error })) => bail!(error),
             Ok(Err(e)) => last = e,
             Err(_) => last = anyhow!("couldn't reach the machine that made the invite (is it online?)"),
         }
     }
-    Err(last)
+    Err(refused.map_or(last, |r| anyhow!(r)))
 }
 
 /// Nothing is known yet about where that machine is.

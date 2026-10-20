@@ -16,7 +16,7 @@ D = tempfile.mkdtemp(prefix="reason-network-mixed-")
 FAKE_BIN = os.path.join(D, "bin")
 UNEXPECTED = os.path.join(D, "unexpected.log")
 # alex and nina run this build, olga the older one.
-WHO = {"alex": (NEW, "laptop"), "olga": (OLD, "oldbox"), "nina": (NEW, "desk"), "mal": (NEW, "evil")}
+WHO = {"alex": (NEW, "laptop"), "olga": (OLD, "oldbox"), "nina": (NEW, "desk"), "nina2": (NEW, "pad"), "mal": (NEW, "evil")}
 results = []
 
 
@@ -39,6 +39,16 @@ def cli(who, *args):
     return (r.stdout + r.stderr).strip()
 
 
+def until(who, args, ok, secs=45):
+    """Runs the command until its output passes `ok` (machines find each other in their own time); the last output."""
+    deadline = time.time() + secs
+    while True:
+        out = cli(who, *args)
+        if ok(out) or time.time() > deadline:
+            return out
+        time.sleep(1)
+
+
 def link_of(out):
     m = re.search(r"https://\S+/join/#\S+", out)
     return m.group(0) if m else ""
@@ -53,7 +63,7 @@ for name in ("open", "xdg-open", "osascript", "notify-send"):
 
 try:
     print(f"this build: {cli('alex', '--version')} · older: {cli('olga', '--version')}")
-    ep = {w: cli(w, "endpoint") for w in ("alex", "nina", "mal")}
+    ep = {w: cli(w, "endpoint") for w in ("alex", "nina", "nina2", "mal")}
     out = cli("alex", "init", "mixed", "--proof", proof("u_alex", "alex", ep["alex"]), "--no-setup")
     check("this build starts a team, signed in", "You are alex on laptop." in out, out)
     link = link_of(cli("alex", "link"))
@@ -61,11 +71,10 @@ try:
     check("the older build can't read an rn1 link", "Joined" not in out, out)
     out = cli("olga", "join", link.replace("#rn1-", "#tincan1"), "--as", "olga", "--no-setup")
     check("…but joins with the same link as tincan1", "Joined team mixed as olga on oldbox." in out, out)
-    time.sleep(5)
-    out = cli("alex", "team")
+    out = until("alex", ["team"], lambda o: re.search(r"olga\s+oldbox\s+(direct|relay)", o))
     check("the older machine is connected, and alex still verified after its state came back",
           re.search(r"olga\s+oldbox\s+(direct|relay)", out) is not None and "alex (verified)" in out, out)
-    out = cli("olga", "team")
+    out = until("olga", ["team"], lambda o: re.search(r"alex\s+laptop\s+(direct|relay)", o))
     check("the older machine sees alex, connected", re.search(r"alex\s+laptop\s+(direct|relay)", out) is not None, out)
 
     # A machine of this build joins through the older one, which knows nothing of proofs.
@@ -73,12 +82,20 @@ try:
     out = cli("nina", "join", old_link, "--proof", proof("u_nina", "nina", ep["nina"]), "--no-setup")
     check("this build joins, signed in, through the older machine", "Joined team mixed as nina on desk." in out, out)
     check("…and its proof goes along anyway", "nina (verified)" in out, out)
-    time.sleep(6)
-    out = cli("alex", "team")
+    out = until("alex", ["team"], lambda o: re.search(r"nina \(verified\)\s+desk\s+(direct|relay)", o))
     check("alex's machine sees nina verified", re.search(r"nina \(verified\)\s+desk\s+(direct|relay)", out) is not None, out)
-    out = cli("olga", "team")
-    check("the older machine has all three, every signed entry checking out",
-          all(re.search(rf"{p}\s+{m}\s+(direct|relay|this machine)", out) for p, m in [("alex", "laptop"), ("olga", "oldbox"), ("nina", "desk")]), out)
+    three = lambda o: all(re.search(rf"{p}\s+{m}\s+(direct|relay|this machine)", o) for p, m in [("alex", "laptop"), ("olga", "oldbox"), ("nina", "desk")])
+    out = until("olga", ["team"], three)
+    check("the older machine has all three, every signed entry checking out", three(out), out)
+    # nina's second computer, through the older machine's link: it asks the link's machines for one of nina's own,
+    # whose word the older machine takes too.
+    old_link = link_of(cli("olga", "link"))  # now listing nina's machine too
+    out = cli("nina2", "join", old_link, "--proof", proof("u_nina", "nina", ep["nina2"]), "--no-setup")
+    check("another computer of nina's account joins through the older machine's link", "Joined team mixed as nina on pad." in out, out)
+    out = until("olga", ["team"], lambda o: re.search(r"nina\s+pad\s+(direct|relay)", o))
+    check("…let in by nina's own machine, so the older machine takes it too", re.search(r"nina\s+pad\s+(direct|relay)", out) is not None, out)
+    cli("nina2", "leave")
+    cli("nina2", "stop")
     out = subprocess.run([NEW, "join", old_link, "--proof", proof("u_mal", "alex", ep["mal"]), "--no-setup", "--json"],
                          env=env("mal"), capture_output=True, text=True, timeout=90).stdout.strip()
     check("a taken name through the older machine is name_taken", out == '{"error":"name_taken"}', out)
@@ -86,8 +103,7 @@ try:
     # Messages both ways, and the state kept across restarts.
     cli("olga", "listen", "--as", "t", "--wait", "0")
     cli("alex", "listen", "--as", "t", "--wait", "0")
-    time.sleep(3)
-    out = cli("alex", "send", "olga/t", "--from", "alex/t", "hello old friend")
+    out = until("alex", ["send", "olga/t", "--from", "alex/t", "hello old friend"], lambda o: "→ olga/t" in o and "no session" not in o)
     check("this build sends to the older one", "→ olga/t" in out, out)
     out = cli("olga", "listen", "--as", "t", "--wait", "10")
     check("…which gets it", "hello old friend" in out, out)
@@ -96,11 +112,8 @@ try:
     check("and back", "hello back" in out, out)
     for w in ("alex", "olga"):
         cli(w, "stop")
-    time.sleep(1)
     cli("olga", "team")
-    cli("alex", "team")
-    time.sleep(8)
-    out = cli("alex", "team")
+    out = until("alex", ["team"], lambda o: re.search(r"olga\s+oldbox\s+(direct|relay)", o))
     check("after both restart, people stay verified", "alex (verified)" in out and "nina (verified)" in out
           and re.search(r"olga\s+oldbox\s+(direct|relay)", out) is not None, out)
 finally:

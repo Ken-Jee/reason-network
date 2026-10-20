@@ -10,9 +10,13 @@ use serde::{Deserialize, Serialize};
 const ISSUER: &str = "https://reasonmachines.com";
 const AUDIENCE: &str = "reason-network";
 const TYPE: &str = "reason-network-proof";
+/// Longer than any proof Reason signs: refused before decoding.
+const MAX_LEN: usize = 4096;
+/// A proof issued further ahead than this is refused (a broken clock, or worse).
+const MAX_SKEW_SECS: i64 = 86_400;
 
 /// Reason's proof-signing public keys: key id, then the Ed25519 key in base64url. A placeholder until the production
-/// key exists; `REASON_NETWORK_TRUST_KEYS` (a JWKS) adds keys, for tests.
+/// key exists; in debug builds `REASON_NETWORK_TRUST_KEYS` (a JWKS) adds keys, for tests.
 const KEYS: &[(&str, &str)] = &[];
 
 /// What a proof says.
@@ -45,11 +49,13 @@ struct Claims {
     proof: Proof,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Deserialize)]
 struct Jwks {
     keys: Vec<Jwk>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Deserialize)]
 struct Jwk {
     kty: String,
@@ -63,14 +69,16 @@ fn key(x: &str) -> Option<PublicKey> {
     PublicKey::from_bytes(&bytes.try_into().ok()?).ok()
 }
 
-/// The keys a proof may be signed with: the compiled-in ones, those in `REASON_NETWORK_TRUST_KEYS`, and in tests a
-/// test key.
+/// The keys a proof may be signed with: the compiled-in ones and, in debug builds, those in
+/// `REASON_NETWORK_TRUST_KEYS` (release builds trust only the compiled-in keys), and in tests a test key.
 fn trusted() -> &'static [(String, PublicKey)] {
     static KEYS_: std::sync::OnceLock<Vec<(String, PublicKey)>> = std::sync::OnceLock::new();
     KEYS_.get_or_init(|| {
+        #[allow(unused_mut)]
         let mut out: Vec<(String, PublicKey)> =
             KEYS.iter().filter_map(|(kid, x)| Some((kid.to_string(), key(x)?))).collect();
-        if let Some(jwks) = crate::paths::env_var_os("TRUST_KEYS")
+        #[cfg(any(test, debug_assertions))]
+        if let Some(jwks) = std::env::var_os("REASON_NETWORK_TRUST_KEYS")
             && let Ok(jwks) = serde_json::from_str::<Jwks>(&jwks.to_string_lossy())
         {
             out.extend(
@@ -89,11 +97,26 @@ fn trusted() -> &'static [(String, PublicKey)] {
 /// Checks `jws` for the machine `endpoint`: Reason's signature, issuer, audience, expiry, and that it names this
 /// machine.
 pub fn verify(jws: &str, endpoint: &EndpointId) -> Result<Proof> {
-    verify_with(jws, endpoint, crate::util::now_ms() / 1000, trusted())
+    verify_with(jws, endpoint, crate::util::now_ms() / 1000, trusted(), true)
 }
 
-fn verify_with(jws: &str, endpoint: &EndpointId, now: i64, keys: &[(String, PublicKey)]) -> Result<Proof> {
+/// The same, except that a proof that expired still counts: for who may hold a name in the team, which mustn't change
+/// as time passes (or differ between machines whose clocks do). Only "verified" goes by `verify`.
+pub fn verify_ignoring_expiry(jws: &str, endpoint: &EndpointId) -> Result<Proof> {
+    verify_with(jws, endpoint, crate::util::now_ms() / 1000, trusted(), false)
+}
+
+fn verify_with(
+    jws: &str,
+    endpoint: &EndpointId,
+    now: i64,
+    keys: &[(String, PublicKey)],
+    expiry: bool,
+) -> Result<Proof> {
     let bad = || anyhow!("this sign-in proof is damaged");
+    if jws.len() > MAX_LEN {
+        bail!("this sign-in proof is too long");
+    }
     let mut parts = jws.trim().split('.');
     let (Some(h), Some(c), Some(s), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
         return Err(bad());
@@ -115,8 +138,11 @@ fn verify_with(jws: &str, endpoint: &EndpointId, now: i64, keys: &[(String, Publ
         bail!("this sign-in proof isn't from Reason Network");
     }
     let p = claims.proof;
-    if p.exp <= now {
+    if expiry && p.exp <= now {
         bail!("this sign-in proof expired; sign in again");
+    }
+    if p.iat > now.saturating_add(MAX_SKEW_SECS) {
+        bail!("this sign-in proof is dated in the future (is this computer's clock right?)");
     }
     if p.endpoint != endpoint.to_string() {
         bail!("this sign-in proof is for another machine");
@@ -213,10 +239,13 @@ pub(crate) mod tests {
     fn only_trusted_keys_count() {
         let me = SecretKey::generate().public();
         let jws = proof("user_1", "alex", &me);
-        assert!(verify_with(&jws, &me, 0, &[]).is_err(), "no keys, nothing verifies");
+        let now = crate::util::now_ms() / 1000;
+        assert!(verify_with(&jws, &me, now, &[], true).is_err(), "no keys, nothing verifies");
         let keys = [(KID.to_string(), signer().public())];
-        assert!(verify_with(&jws, &me, 0, &keys).is_ok());
-        assert!(verify_with(&jws, &me, i64::MAX, &keys).is_err(), "expired by then");
+        assert!(verify_with(&jws, &me, now, &keys, true).is_ok());
+        let later = now + 91 * 86_400;
+        assert!(verify_with(&jws, &me, later, &keys, true).is_err(), "expired by then");
+        assert!(verify_with(&jws, &me, later, &keys, false).is_ok(), "but still Reason's word, for who holds a name");
     }
 
     #[test]
@@ -226,5 +255,55 @@ pub(crate) mod tests {
             serde_json::from_value(json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "kid": KID, "x": x}]})).unwrap();
         assert_eq!(key(&jwks.keys[0].x), Some(signer().public()));
         assert_eq!(key("not base64!"), None);
+    }
+
+    #[test]
+    fn an_expired_proof_still_says_whose_machine_it_is() {
+        let me = SecretKey::generate().public();
+        let mut c = claims("user_1", "alex", &me);
+        c["exp"] = json!(crate::util::now_ms() / 1000 - 1);
+        let jws = sign_with(&signer(), json!({"alg": "EdDSA", "kid": KID, "typ": TYPE}), c);
+        assert!(verify(&jws, &me).is_err());
+        assert_eq!(verify_ignoring_expiry(&jws, &me).unwrap().sub, "user_1");
+        // Everything else still counts.
+        assert!(verify_ignoring_expiry(&jws, &SecretKey::generate().public()).is_err());
+        let forged = sign_with(
+            &SecretKey::generate(),
+            json!({"alg": "EdDSA", "kid": KID, "typ": TYPE}),
+            claims("user_1", "alex", &me),
+        );
+        assert!(verify_ignoring_expiry(&forged, &me).is_err());
+    }
+
+    #[test]
+    fn refuses_proofs_from_the_future() {
+        let me = SecretKey::generate().public();
+        for iat in [json!(i64::MAX), json!(crate::util::now_ms() / 1000 + 2 * 86_400)] {
+            let mut c = claims("user_1", "alex", &me);
+            c["iat"] = iat;
+            let jws = sign_with(&signer(), json!({"alg": "EdDSA", "kid": KID, "typ": TYPE}), c);
+            assert!(verify(&jws, &me).unwrap_err().to_string().contains("in the future"));
+            assert!(verify_ignoring_expiry(&jws, &me).is_err());
+        }
+        let mut c = claims("user_1", "alex", &me);
+        c["iat"] = json!(crate::util::now_ms() / 1000 + 3600);
+        assert!(
+            verify(&sign_with(&signer(), json!({"alg": "EdDSA", "kid": KID, "typ": TYPE}), c), &me).is_ok(),
+            "a clock a bit ahead"
+        );
+    }
+
+    #[test]
+    fn refuses_a_huge_proof_before_decoding_it() {
+        let me = SecretKey::generate().public();
+        let header = BASE64URL_NOPAD.encode(br#"{"alg":"EdDSA","kid":"test-1","typ":"reason-network-proof"}"#);
+        for big in [
+            format!("{}.A.{}", "A".repeat(4 << 20), "A".repeat(86)),
+            format!("{header}.{}.{}", "A".repeat(4 << 20), "A".repeat(86)),
+        ] {
+            let t = std::time::Instant::now();
+            assert!(verify(&big, &me).unwrap_err().to_string().contains("too long"));
+            assert!(t.elapsed() < std::time::Duration::from_millis(50), "{:?}", t.elapsed());
+        }
     }
 }
