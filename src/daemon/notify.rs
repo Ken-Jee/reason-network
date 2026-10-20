@@ -71,14 +71,51 @@ pub(super) fn notify_send() -> Option<Command> {
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(super) fn notify_send_at(bin: std::path::PathBuf) -> Option<Command> {
     let mut cmd = Command::new(bin);
-    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-        let bus = format!("/run/user/{}/bus", unsafe { libc::getuid() });
-        if !std::path::Path::new(&bus).exists() {
-            return None;
+    let bus = match std::env::var_os("DBUS_SESSION_BUS_ADDRESS") {
+        Some(bus) => bus,
+        None => {
+            let bus = format!("/run/user/{}/bus", unsafe { libc::getuid() });
+            if !std::path::Path::new(&bus).exists() {
+                return None;
+            }
+            format!("unix:path={bus}").into()
         }
-        cmd.env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={bus}"));
+    };
+    // Linger keeps a user bus up with nobody at the screen (a server, a box reached over SSH): only a notification
+    // server on it makes a desktop. One started on demand counts once it runs.
+    if !notifications_on(&bus) {
+        return None;
     }
+    cmd.env("DBUS_SESSION_BUS_ADDRESS", bus);
     Some(cmd)
+}
+
+/// Whether the bus at `bus` has a notification server. Only a clear no counts: without busctl, or on a bus it can't
+/// reach, notify-send finds out. It's asked under the daemon's lock, so a bus that hangs gets a second in all
+/// (`--timeout` doesn't cover connecting).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn notifications_on(bus: &std::ffi::OsStr) -> bool {
+    let Some(busctl) = super::ask::asker_bin("busctl", &["/usr/bin/busctl", "/run/current-system/sw/bin/busctl"])
+    else {
+        return true;
+    };
+    let Ok(mut child) = Command::new(busctl)
+        .env("DBUS_SESSION_BUS_ADDRESS", bus)
+        .args(["--user", "--timeout=1", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus"])
+        .args(["org.freedesktop.DBus", "NameHasOwner", "s", "org.freedesktop.Notifications"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return true;
+    };
+    let until = Instant::now() + Duration::from_secs(1);
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = child.kill();
+    !matches!(child.wait_with_output(), Ok(o) if o.status.success() && o.stdout.trim_ascii() == b"b false")
 }
 
 /// Most notification servers read markup.
@@ -115,4 +152,32 @@ pub(super) fn powershell_at(bin: std::path::PathBuf, script: &str) -> Command {
     // CREATE_NO_WINDOW: no console flashing up next to the notification.
     cmd.creation_flags(0x0800_0000);
     cmd
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+    use std::io::BufRead;
+
+    #[test]
+    fn a_bus_without_a_notification_server_is_no_desktop() {
+        let Some(daemon) = agent::find_bin("dbus-daemon").filter(|_| agent::find_bin("busctl").is_some()) else {
+            return;
+        };
+        let mut bus = Command::new(daemon)
+            .args(["--session", "--nofork", "--print-address"])
+            .arg(format!("--address=unix:tmpdir={}", std::env::temp_dir().display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut address = String::new();
+        std::io::BufReader::new(bus.stdout.take().unwrap()).read_line(&mut address).unwrap();
+        let on = notifications_on(address.trim().as_ref());
+        bus.kill().unwrap();
+        bus.wait().unwrap();
+        assert!(!on);
+        // A bus it can't reach is left to notify-send.
+        assert!(notifications_on("unix:path=/nonexistent".as_ref()));
+    }
 }

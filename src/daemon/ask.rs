@@ -437,9 +437,9 @@ fn clip(text: &str, max: usize) -> String {
     if t.chars().count() <= max { t } else { format!("{}…", t.chars().take(max).collect::<String>().trim_end()) }
 }
 
-/// The program that shows the question: in a release build only the system's own, so an agent can't start this machine's
-/// engine with one that answers for its person. (Debug builds take `REASON_NETWORK_<NAME>_BIN`, for tests.)
-fn asker_bin(name: &str, system: &[&str]) -> Option<std::path::PathBuf> {
+/// The program that shows the question, or finds where to: in a release build only the system's own, so an agent can't
+/// start this machine's engine with one that answers for its person. (Debug builds take `REASON_NETWORK_<NAME>_BIN`.)
+pub(super) fn asker_bin(name: &str, system: &[&str]) -> Option<std::path::PathBuf> {
     if cfg!(debug_assertions) {
         return crate::agent::find_bin(name);
     }
