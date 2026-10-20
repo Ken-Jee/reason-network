@@ -482,9 +482,10 @@ mod tests {
 
     #[test]
     fn a_person_sees_the_directory_as_typed() {
-        let d = bobs("vibes <dev>", "bob", "acme/api", "main", "fix <café>");
+        let doing = "fix <café>, price < €5, 翻译《红楼梦》";
+        let d = bobs("vibes <dev>", "bob", "acme/api", "main", doing);
         for out in [directory(&d, false, Paint(true)), directory(&d, false, Paint::PLAIN)] {
-            assert!(out.contains("vibes <dev>") && out.contains("↳ fix <café>"), "{out:?}");
+            assert!(out.contains("vibes <dev>") && out.contains(&format!("↳ {doing}")), "{out:?}");
         }
     }
 
