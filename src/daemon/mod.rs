@@ -129,6 +129,8 @@ struct Inner {
     polling: HashMap<String, usize>,
     /// Recent agent-to-agent message times per (from, to), for the loop guard.
     pairs: HashMap<(String, String), VecDeque<Instant>>,
+    /// When the inbox folder was last swept of files no longer kept (ms).
+    swept: i64,
 }
 
 /// A session running on this machine.
@@ -169,7 +171,7 @@ fn load_key() -> Result<SecretKey> {
 impl Daemon {
     fn open() -> Result<Self> {
         let cfg = Config::load();
-        let store = Store::open(&paths::db())?;
+        let store = Store::open(&paths::db(), paths::inbox())?;
         let team: Option<TeamState> = store.get("team")?.and_then(|s| serde_json::from_str(&s).ok());
         let key = load_key()?;
         // In a team, who we are is what the signed roster says, whatever the config file says.
@@ -188,6 +190,7 @@ impl Daemon {
                 in_flight: HashMap::new(),
                 polling: HashMap::new(),
                 pairs: HashMap::new(),
+                swept: 0,
             }),
             arrived: Notify::new(),
             git_cache: Mutex::new(HashMap::new()),
@@ -275,8 +278,8 @@ impl Daemon {
             }
             Request::SetStatus { key, doing, name } => json!(self.set_status(&key, doing, name)?),
             Request::Who { me, filter, all } => json!(self.who(me, filter, all).await?),
-            Request::Send { from, to, body, reply_to, wake, notify } => {
-                json!(self.send(from, &to, &body, reply_to, wake, notify, None).await?)
+            Request::Send { from, to, body, reply_to, wake, notify, files } => {
+                json!(self.send(from, &to, &body, reply_to, wake, notify, None, files).await?)
             }
             Request::Inbox { key, wait_secs, peek } => json!(self.inbox(key, wait_secs.min(MAX_WAIT), peek).await?),
             Request::Unread { key } => json!(self.unread(&key)?),

@@ -201,7 +201,10 @@ impl Daemon {
         let signed = Box::new(Signed::new(approval, &self.key, team.name(), "approval"));
         let live = self.inner.lock().unwrap().live.contains_key(key);
         let from = if live { key.to_string() } else { self.terminal().await };
-        match self.send(from, &request.from, &said, Some(request.id.clone()), true, false, Some(signed)).await {
+        match self
+            .send(from, &request.from, &said, Some(request.id.clone()), true, false, Some(signed), Vec::new())
+            .await
+        {
             Ok(_) => format!(" (Sent to {}, signed.)", request.from),
             Err(e) => {
                 log(&format!("couldn't send {}'s answer to {}: {e:#}", self.person, request.from));
@@ -239,7 +242,7 @@ impl Daemon {
         let Some(to) = g.live.get(key).map(|l| self.addr(&l.name)) else {
             return log(&format!("{key} had gone before {} answered its question", self.person));
         };
-        let msg = Message {
+        let mut msg = Message {
             id: Ulid::new().to_string(),
             from: format!("{}/terminal", self.person),
             from_agent: None,
@@ -252,8 +255,9 @@ impl Daemon {
             notify: false,
             sent_at: util::now_ms(),
             approval: None,
+            files: Vec::new(),
         };
-        if let Err(e) = g.store.insert(&msg, false) {
+        if let Err(e) = g.store.insert(&mut msg, false) {
             return log(&format!("couldn't keep a late answer: {e}"));
         }
         self.deliver(&mut g, key, vec![msg], true);

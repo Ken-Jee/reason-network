@@ -53,6 +53,16 @@ pub struct Presence {
     pub sessions: Vec<SessionInfo>,
     /// Names of this machine's offline sessions, so mail for them can be queued here.
     pub known: Vec<String>,
+    /// What this machine's engine takes beyond what every version does (`files`). Older engines leave it out, and
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+impl Presence {
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -515,7 +525,7 @@ impl Net {
     pub fn note_session(&self, peer: &EndpointId, name: &str) {
         let mut remote = self.remote.lock().unwrap();
         let rem = remote.entry(*peer).or_insert_with(|| Remote {
-            presence: Presence { sessions: Vec::new(), known: Vec::new() },
+            presence: Presence::default(),
             last_seen: util::now_ms(),
             online: true,
         });
@@ -697,6 +707,8 @@ fn tidy_presence(mut p: Presence) -> Presence {
         .map(|n| util::slug(n).chars().take(64).collect())
         .filter(|n: &String| !n.is_empty())
         .collect();
+    p.features.truncate(20);
+    p.features.iter_mut().for_each(|f| *f = util::slug(f).chars().take(32).collect());
     p
 }
 
@@ -718,5 +730,29 @@ mod tests {
         // The same side dialing again is a reconnect, not a race.
         assert!(!is_duplicate(small, new, small, small));
         assert!(!is_duplicate(large, new, large, small));
+    }
+
+    #[test]
+    fn presence_says_files_are_taken_and_older_engines_read_it_as_before() {
+        let new =
+            Presence { known: vec!["api".into()], features: vec![crate::files::FEATURE.into()], ..Default::default() };
+        assert!(new.has("files"));
+        let wire = serde_json::to_string(&Wire::Presence { presence: new }).unwrap();
+        // As an engine from before files reads it: the field is ignored.
+        #[derive(Deserialize)]
+        struct OlderPresence {
+            known: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "t", rename_all = "snake_case")]
+        enum OlderWire {
+            Presence { presence: OlderPresence },
+        }
+        let OlderWire::Presence { presence } = serde_json::from_str(&wire).unwrap();
+        assert_eq!(presence.known, ["api"]);
+        // And an older engine's presence says nothing of files.
+        let older: Presence = serde_json::from_str(r#"{"sessions":[],"known":[]}"#).unwrap();
+        assert!(!older.has("files"));
+        assert!(tidy_presence(Presence { features: vec!["files".into()], ..Default::default() }).has("files"));
     }
 }

@@ -285,6 +285,11 @@ impl Daemon {
             let live: HashSet<&str> = g.live.values().map(|l| l.name.as_str()).collect();
             let _ = g.store.forget_sessions(now - FORGET_MS, &live, &self.person);
         }
+        // Files of messages that are gone, or were read a day ago.
+        if now - g.swept > 10 * 60_000 {
+            g.swept = now;
+            g.store.sweep_files(now);
+        }
     }
 }
 

@@ -40,6 +40,9 @@ trust the new hooks.
 - **Messages land right away.** Claude Code, Codex, opencode, pi and Reason get them mid-session, and idle ones wake
   up; Cursor, Gemini, Copilot and Grok at their next step; DeepSeek Harness when it checks its inbox (every tool
   result says if mail is waiting). Claude sessions you already had open join without a restart.
+- **Small text files go along.** A message can carry up to 10 text files (markdown, code, JSON, logs, config; 256 KB
+  each, 512 KB in all). The recipient's engine saves copies under `~/.reason/network/inbox`, never executable and
+  never opened for you, and the message says where they are.
 - **Your sign-off, even when you're away from your agent.** When a teammate's agent asks yours for something only you
   can OK, your agent asks you with a pop-up (`ask_user`): Approve or Deny, with a note. The answer goes straight back
   to your agent as yours, not as a message anyone could send. With `notify`, a message also pops up on the person's
@@ -52,6 +55,7 @@ trust the new hooks.
 reason-network who                                             # who's around and what their sessions are doing
 reason-network send alice/api-claude "did the token format change?"   # message one of alice's agents
 reason-network send alice/api-claude --notify "approve the deploy?"   # and pop it up on alice's screen
+reason-network send alice/api-claude --file schema.json "the schema I meant"   # with a small text file
 reason-network send '*' "deploying api at 5"   # everyone (or alice/*, repo:api): from you, never an agent
 reason-network listen --as terminal                            # replies to what you sent from this terminal
 reason-network link                                            # the team link again

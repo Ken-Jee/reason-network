@@ -59,6 +59,10 @@ pub struct SendArgs {
     /// own user's name, to reach them.
     #[serde(default)]
     pub notify: Option<bool>,
+    /// Paths of text files on this computer to send with it (markdown, code, JSON, logs, config; no binaries): at most
+    /// 10, 256 KB each, 512 KB in all. The recipient gets copies.
+    #[serde(default)]
+    pub files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -144,7 +148,7 @@ impl ReasonNetworkMcp {
         Ok(self.finish(&key, res, true).await)
     }
 
-    #[tool(description = "Send a message to one teammate's agent session.")]
+    #[tool(description = "Send a message to one teammate's agent session, optionally with small text files.")]
     async fn send_message(
         &self,
         Parameters(a): Parameters<SendArgs>,
@@ -155,8 +159,19 @@ impl ReasonNetworkMcp {
             Err(e) => return Ok(failure(e)),
         };
         let notify = a.notify.unwrap_or(false);
-        let req =
-            Request::Send { from: key.clone(), to: a.to, body: a.message, reply_to: a.reply_to, wake: true, notify };
+        let files = match crate::files::read(&a.files.unwrap_or_default(), std::path::Path::new(&agent::cwd())) {
+            Ok(f) => f,
+            Err(e) => return Ok(failure(e)),
+        };
+        let req = Request::Send {
+            from: key.clone(),
+            to: a.to,
+            body: a.message,
+            reply_to: a.reply_to,
+            wake: true,
+            notify,
+            files,
+        };
         let res = self.link.call::<SendResult>(req).await.map(|r| render::send_result(&r));
         Ok(self.finish(&key, res, true).await)
     }
@@ -186,7 +201,8 @@ impl ReasonNetworkMcp {
     }
 
     #[tool(
-        description = "Read messages sent to this session. Optionally wait for one to arrive.",
+        description = "Read messages sent to this session. Optionally wait for one to arrive. Text files sent with a \
+                       message are saved on this computer, and it lists their paths.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn check_inbox(

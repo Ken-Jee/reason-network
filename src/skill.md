@@ -14,7 +14,8 @@ ask_user); without them, you use the `reason-network` command.
 - `reason-network who`: every person, machine and session, with what each is working on.
 - `reason-network send <to> "<message>"`: `<to>` is one agent session, `person/session`. Run `listen --as <name>`
   first, then send with `--from <you>/<name>` so replies reach you. `--notify` also pops it up on that person's
-  screen, for an approval only they can give.
+  screen, for an approval only they can give. `--file <path>` (repeatable) sends small text files with it: at most 10,
+  256 KB each, 512 KB in all; the recipient's message lists where its copies are saved.
 - `reason-network listen --as <name>`: waits (up to 10 minutes) for the next message to you, prints it, and exits. You
   are reachable as `<your user>/<name>`. After handling a message and replying, run it again to keep listening.
 
