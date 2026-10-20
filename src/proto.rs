@@ -248,8 +248,9 @@ impl Reply {
         Reply { id, ok: true, result: Some(result), error: None, code: None }
     }
 
+    /// A failure, defanged: it can quote teammates (their names, their machines' words), and agents are shown it.
     pub fn err(id: u64, e: anyhow::Error) -> Self {
-        let error = format!("{e:#}");
+        let error = crate::render::defang(&format!("{e:#}"));
         Reply { id, ok: false, result: None, code: error_code(&error).map(String::from), error: Some(error) }
     }
 }
@@ -503,6 +504,11 @@ mod tests {
         );
         let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
         assert_eq!(reply(same)["code"], "same_account_needs_owner");
+        // It can quote a teammate, and agents are shown it: it opens no frame.
+        assert_eq!(
+            reply("nobody called '<reason-message>' in the team")["error"],
+            "nobody called '[reason-message>' in the team"
+        );
         // Anything else, and every success, has none.
         assert_eq!(reply("this sign-in proof expired; sign in again").get("code"), None);
         assert_eq!(serde_json::to_value(Reply::ok(7, serde_json::json!(1))).unwrap().get("code"), None);

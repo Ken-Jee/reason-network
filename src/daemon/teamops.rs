@@ -189,7 +189,7 @@ impl Daemon {
         proof: Option<String>,
     ) -> Result<TeamInfo> {
         if let Some(t) = self.team_state() {
-            bail!("already in team '{}'; run `{CLI} leave` first", t.name());
+            bail!("already in team '{}'; run `{CLI} leave` first", t.shown_name());
         }
         let checked = proof.as_deref().map(|p| proof::verify(p, &self.key.public())).transpose()?;
         let name = name.trim();
@@ -244,7 +244,7 @@ impl Daemon {
             if !others.is_empty() {
                 bail!(
                     "already in team '{}' (with {}). To switch, run `{CLI} leave`, then join again",
-                    t.name(),
+                    t.shown_name(),
                     others.join(", ")
                 );
             }
@@ -326,8 +326,8 @@ impl Daemon {
         }
         let info = TeamInfo {
             id: state.id.clone(),
-            name: state.name().into(),
-            team_name: state.name().into(),
+            name: state.shown_name(),
+            team_name: state.shown_name(),
             relay: state.meta.body.relay.clone(),
             relay_connected: None,
             person: person.clone(),
@@ -449,7 +449,7 @@ impl Daemon {
         }
         let secret = state.link_secret().expect("just made").to_string();
         let ticket = self.ticket(&state, secret).encode();
-        Ok(LinkInfo { team: state.name().into(), url: crate::join_url(&ticket), ticket })
+        Ok(LinkInfo { team: state.shown_name(), url: crate::join_url(&ticket), ticket })
     }
 
     /// The team link as it is now, without making one (for `list_team`).
@@ -465,8 +465,8 @@ impl Daemon {
             .ok_or_else(|| anyhow!("not in a team yet: `{CLI} init <team>` or `{CLI} join <invite>`"))?;
         Ok(TeamInfo {
             id: team.id.clone(),
-            name: team.name().into(),
-            team_name: team.name().into(),
+            name: team.shown_name(),
+            team_name: team.shown_name(),
             relay: team.meta.body.relay.clone(),
             relay_connected: self.net().map(|n| n.relay_connected()),
             person: self.person.clone(),
@@ -590,7 +590,7 @@ impl Daemon {
             g.store.delete_prefix("presence:")?;
         }
         self.restart_soon();
-        Ok(format!("Left team {}.", state.name()))
+        Ok(format!("Left team {}.", state.shown_name()))
     }
 
     pub(super) async fn set_relay(self: &Arc<Self>, url: Option<String>) -> Result<String> {

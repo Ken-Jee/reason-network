@@ -397,7 +397,10 @@ impl Net {
             relays: relay.map_or_else(crate::relays::current, |u| u.parse().into_iter().collect()),
             daemon: Arc::downgrade(daemon),
             links: Default::default(),
-            remote: Mutex::new(remote),
+            // Saved by an older build, maybe, which tidied less.
+            remote: Mutex::new(
+                remote.into_iter().map(|(id, r)| (id, Remote { presence: tidy_presence(r.presence), ..r })).collect(),
+            ),
             acks: Default::default(),
             dialing: Default::default(),
             wake: Notify::new(),

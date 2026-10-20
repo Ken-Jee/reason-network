@@ -197,7 +197,8 @@ impl ReasonNetworkMcp {
                 return Ok(failure(anyhow::anyhow!("cancelled")));
             }
         };
-        Ok(self.finish(&key, got, true).await)
+        // It can quote what the teammate's machine said when the answer was sent.
+        Ok(self.finish(&key, got.map(|t| render::defang(&t)), true).await)
     }
 
     #[tool(

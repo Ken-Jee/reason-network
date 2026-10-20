@@ -175,7 +175,8 @@ impl Daemon {
     fn open() -> Result<Self> {
         let cfg = Config::load();
         let store = Store::open(&paths::db(), paths::inbox())?;
-        let team: Option<TeamState> = store.get("team")?.and_then(|s| serde_json::from_str(&s).ok());
+        let team: Option<TeamState> =
+            store.get("team")?.and_then(|s| serde_json::from_str(&s).ok()).map(TeamState::without_odd_names);
         let key = load_key()?;
         // In a team, who we are is what the signed roster says, whatever the config file says.
         let member = team.as_ref().and_then(|t| t.member(&key.public()).cloned());
