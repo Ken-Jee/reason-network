@@ -217,14 +217,18 @@ impl TeamState {
             .collect()
     }
 
-    /// Records `endpoint`'s sign-in proof, if it is Reason's (expired or not) and newer than the one it has; true if it
-    /// was taken.
+    /// Records `endpoint`'s sign-in proof, if it is Reason's (expired or not) and newer than the one it has (issued later;
+    /// the same second, the greater JWS, so every machine keeps the same one); true if it was taken.
     pub fn attest(&mut self, endpoint: &EndpointId, jws: &str) -> bool {
+        let jws = jws.trim();
         let Ok(p) = proof::verify_ignoring_expiry(jws, endpoint) else { return false };
-        if self.signed_proof(endpoint).is_some_and(|cur| cur.iat >= p.iat) {
+        let key = endpoint.to_string();
+        if let Some(cur) = self.signed_proof(endpoint)
+            && (cur.iat, self.attestations[&key].as_str()) >= (p.iat, jws)
+        {
             return false;
         }
-        self.attestations.insert(endpoint.to_string(), jws.trim().to_string());
+        self.attestations.insert(key, jws.to_string());
         true
     }
 
@@ -1152,5 +1156,20 @@ mod tests {
         s.put_member(&a, b.public(), "alex", "mini", true);
         assert!(s.has_proof(&a.public()) && !s.has_proof(&b.public()));
         assert!(s.verified_people().contains_key("alex"), "alex is verified, on both machines");
+    }
+
+    #[test]
+    fn proofs_issued_the_same_second_converge() {
+        let a = key();
+        let s = TeamState::found("vibes", "alex", "mbp", &a);
+        let (mut p, mut q) = (s.clone(), s.clone());
+        // Two proofs Reason issued in the same second (same iat, other claims differ).
+        assert!(p.attest(&a.public(), &proof_for("u_alex", "alex", &a, 3600)));
+        assert!(q.attest(&a.public(), &proof_for("u_alex", "alex", &a, 7200)));
+        assert_ne!(p.attestations, q.attestations);
+        p.merge(&q).unwrap();
+        q.merge(&p).unwrap();
+        assert_eq!(p.attestations, q.attestations, "both keep the same one");
+        assert!(!p.merge(&q).unwrap() && !q.merge(&p).unwrap(), "and then nothing changes");
     }
 }

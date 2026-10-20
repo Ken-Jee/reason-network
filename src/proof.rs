@@ -17,6 +17,10 @@ const MAX_SKEW_SECS: i64 = 86_400;
 
 /// Reason's proof-signing public keys: key id, then the Ed25519 key in base64url. A placeholder until the production
 /// key exists; in debug builds `REASON_NETWORK_TRUST_KEYS` (a JWKS) adds keys, for tests.
+///
+/// Never remove a key, even a retired one: who holds a name in a team rests on proofs' signatures (expired proofs
+/// included), so a build without a key that signed some would drop machines that every other build keeps. Add the
+/// new key next to it instead.
 const KEYS: &[(&str, &str)] = &[];
 
 /// What a proof says.

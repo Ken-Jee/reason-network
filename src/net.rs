@@ -198,7 +198,7 @@ async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
 /// Joins a team: asks each machine in turn (the ticket's, or the one an invite code points at) to let us in.
 pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest) -> Result<TeamState> {
     let mut last = anyhow!("the invite lists no machines");
-    let mut refused: Option<String> = None;
+    let mut refused = Refusals::default();
     for addr in peers {
         let attempt = || async {
             let conn = endpoint.connect(addr.clone(), JOIN_ALPN).await?;
@@ -222,19 +222,31 @@ pub async fn join(endpoint: &Endpoint, peers: &[EndpointAddr], req: &JoinRequest
         };
         match reply {
             Ok(Ok(JoinReply::Ok { state })) => return Ok(*state),
-            // A refusal is final: another machine would say the same. Except, asking for one of the person's own
-            // machines, from a machine that isn't (or an older one, which can't tell): the next may be.
-            Ok(Ok(JoinReply::Err { error })) if req.owner_only => {
-                if refused.as_ref().is_none_or(|r| !r.contains(crate::team::SAME_ACCOUNT)) {
-                    refused = Some(error);
-                }
-            }
-            Ok(Ok(JoinReply::Err { error })) => bail!(error),
+            Ok(Ok(JoinReply::Err { error })) => refused.add(req, error)?,
             Ok(Err(e)) => last = e,
             Err(_) => last = anyhow!("couldn't reach the machine that made the invite (is it online?)"),
         }
     }
-    Err(refused.map_or(last, |r| anyhow!(r)))
+    Err(refused.0.map_or(last, |r| anyhow!(r)))
+}
+
+/// What the machines asked so far refused a join with. A refusal is final: another machine would say the same. Except
+/// for a joiner with a sign-in proof: a machine may not be one of the person's own (`SAME_ACCOUNT`), or may be an older
+/// one that knows nothing of proofs (and says the name is taken), while one further down the link can still let it in.
+#[derive(Default)]
+struct Refusals(Option<String>);
+
+impl Refusals {
+    fn add(&mut self, req: &JoinRequest, error: String) -> Result<()> {
+        if req.proof.is_none() {
+            bail!(error);
+        }
+        // Told once that it's the same account, the joiner keeps that (not an older machine's "taken").
+        if self.0.as_ref().is_none_or(|r| !r.contains(crate::team::SAME_ACCOUNT)) {
+            self.0 = Some(error);
+        }
+        Ok(())
+    }
 }
 
 /// Nothing is known yet about where that machine is.
@@ -717,6 +729,31 @@ fn tidy_presence(mut p: Presence) -> Presence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_joiner_with_a_proof_asks_on_past_a_refusal() {
+        let req = |proof: Option<&str>, owner_only| JoinRequest {
+            team: String::new(),
+            secret: String::new(),
+            person: "alex".into(),
+            machine: "mini".into(),
+            proof: proof.map(String::from),
+            owner_only,
+        };
+        let taken = "'alex' is already in this team; join with another name (--as)";
+        let same = "only one of alex's own computers lets this one in as alex (same_account_needs_owner)";
+        // Without a proof, the first refusal is the answer.
+        assert!(Refusals::default().add(&req(None, false), taken.into()).is_err());
+        // With one, in either pass (the second asks without owner_only), an older machine's "taken" isn't final: a
+        // machine of this build further down the link may let it in.
+        for owner_only in [true, false] {
+            let mut r = Refusals::default();
+            r.add(&req(Some("jws"), owner_only), taken.into()).unwrap();
+            r.add(&req(Some("jws"), owner_only), same.into()).unwrap();
+            r.add(&req(Some("jws"), owner_only), taken.into()).unwrap();
+            assert_eq!(r.0.as_deref(), Some(same), "the same account, once known, is what it says in the end");
+        }
+    }
 
     #[test]
     fn a_stale_connection_is_replaced_but_a_simultaneous_dial_is_dropped() {

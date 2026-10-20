@@ -16,7 +16,7 @@ D = tempfile.mkdtemp(prefix="reason-network-mixed-")
 FAKE_BIN = os.path.join(D, "bin")
 UNEXPECTED = os.path.join(D, "unexpected.log")
 # alex and nina run this build, olga the older one.
-WHO = {"alex": (NEW, "laptop"), "olga": (OLD, "oldbox"), "nina": (NEW, "desk"), "nina2": (NEW, "pad"), "mal": (NEW, "evil")}
+WHO = {"alex": (NEW, "laptop"), "olga": (OLD, "oldbox"), "nina": (NEW, "desk"), "nina2": (NEW, "pad"), "nina3": (NEW, "tab"), "mal": (NEW, "evil")}
 results = []
 
 
@@ -63,7 +63,7 @@ for name in ("open", "xdg-open", "osascript", "notify-send"):
 
 try:
     print(f"this build: {cli('alex', '--version')} · older: {cli('olga', '--version')}")
-    ep = {w: cli(w, "endpoint") for w in ("alex", "nina", "nina2", "mal")}
+    ep = {w: cli(w, "endpoint") for w in ("alex", "nina", "nina2", "nina3", "mal")}
     out = cli("alex", "init", "mixed", "--proof", proof("u_alex", "alex", ep["alex"]), "--no-setup")
     check("this build starts a team, signed in", "You are alex on laptop." in out, out)
     link = link_of(cli("alex", "link"))
@@ -96,6 +96,16 @@ try:
     check("…let in by nina's own machine, so the older machine takes it too", re.search(r"nina\s+pad\s+(direct|relay)", out) is not None, out)
     cli("nina2", "leave")
     cli("nina2", "stop")
+    # With nina's machine off, the older machine first on its link says the name is taken; alex's machine, further
+    # down, lets the new computer in on its proof (which the older machine doesn't take, as documented).
+    cli("nina", "stop")
+    until("olga", ["team"], lambda o: not re.search(r"nina\s+desk\s+(direct|relay)", o))
+    out = cli("nina3", "join", link_of(cli("olga", "link")), "--proof", proof("u_nina", "nina", ep["nina3"]), "--no-setup")
+    check("past the older machine's refusal, a machine of this build lets nina's computer in", "Joined team mixed as nina on tab." in out, out)
+    out = until("alex", ["team"], lambda o: re.search(r"nina \(verified\)\s+tab\s+(direct|relay)", o))
+    check("…which this build's machines take", re.search(r"nina \(verified\)\s+tab\s+(direct|relay)", out) is not None, out)
+    cli("nina3", "leave")
+    cli("nina3", "stop")
     out = subprocess.run([NEW, "join", old_link, "--proof", proof("u_mal", "alex", ep["mal"]), "--no-setup", "--json"],
                          env=env("mal"), capture_output=True, text=True, timeout=90).stdout.strip()
     check("a taken name through the older machine is name_taken", out == '{"error":"name_taken"}', out)
