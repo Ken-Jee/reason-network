@@ -209,6 +209,7 @@ impl Daemon {
         Ok(TeamInfo {
             id: self.team_id().unwrap_or_default(),
             name: name.into(),
+            team_name: name.into(),
             relay,
             relay_connected: None,
             person,
@@ -292,6 +293,7 @@ impl Daemon {
         let info = TeamInfo {
             id: state.id.clone(),
             name: state.name().into(),
+            team_name: state.name().into(),
             relay: state.meta.body.relay.clone(),
             relay_connected: None,
             person: person.clone(),
@@ -429,6 +431,7 @@ impl Daemon {
         Ok(TeamInfo {
             id: team.id.clone(),
             name: team.name().into(),
+            team_name: team.name().into(),
             relay: team.meta.body.relay.clone(),
             relay_connected: self.net().map(|n| n.relay_connected()),
             person: self.person.clone(),

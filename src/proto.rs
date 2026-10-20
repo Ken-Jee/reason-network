@@ -330,9 +330,13 @@ pub struct MachineInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamInfo {
-    #[serde(default)]
+    /// The team's id, 32 hex digits (the Reason CLI and connector route by it).
+    #[serde(default, rename = "team_id")]
     pub id: String,
     pub name: String,
+    /// `name` again, under the name `team --json` gives it.
+    #[serde(default)]
+    pub team_name: String,
     pub relay: Option<String>,
     /// Whether this machine is on its relay right now (`None` while the network isn't up).
     #[serde(default)]
@@ -415,4 +419,32 @@ pub struct Inbox {
 pub struct Unread {
     pub count: u32,
     pub from: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_team_reply_names_the_team_by_id_and_name() {
+        let t = TeamInfo {
+            id: "00112233445566778899aabbccddeeff".into(),
+            name: "vibes".into(),
+            team_name: "vibes".into(),
+            relay: None,
+            relay_connected: None,
+            person: "alex".into(),
+            machine: "mbp".into(),
+            machines: vec![],
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["team_id"], "00112233445566778899aabbccddeeff");
+        assert_eq!((v["team_name"].as_str(), v["name"].as_str()), (Some("vibes"), Some("vibes")));
+        // A reply from a daemon before these fields still reads.
+        let old: TeamInfo =
+            serde_json::from_value(serde_json::json!({"name": "vibes", "relay": null, "person": "alex",
+            "machine": "mbp", "machines": []}))
+            .unwrap();
+        assert_eq!((old.id.as_str(), old.name.as_str()), ("", "vibes"));
+    }
 }
