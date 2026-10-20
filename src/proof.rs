@@ -133,27 +133,8 @@ pub fn verify_ignoring_expiry(jws: &str, endpoint: &EndpointId) -> Result<Proof>
 }
 
 fn verify_with(jws: &str, endpoint: &EndpointId, now: i64, keys: &[(String, Key)], expiry: bool) -> Result<Proof> {
-    let bad = || anyhow!("this sign-in proof is damaged");
-    if jws.len() > MAX_LEN {
-        bail!("this sign-in proof is too long");
-    }
-    let mut parts = jws.trim().split('.');
-    let (Some(h), Some(c), Some(s), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
-        return Err(bad());
-    };
-    let decode = |p: &str| BASE64URL_NOPAD.decode(p.as_bytes()).map_err(|_| bad());
-    let header: Header = serde_json::from_slice(&decode(h)?).map_err(|_| bad())?;
-    // RS256 only: never `none`, nor HS256 with the public key taken for a shared secret.
-    if header.alg != "RS256" || header.typ != TYPE {
-        bail!("not a Reason Network sign-in proof");
-    }
-    let Some((_, key)) = keys.iter().find(|(kid, _)| *kid == header.kid) else {
-        bail!("this sign-in proof is signed with a key this version doesn't know (update Reason Network)");
-    };
-    if key.verify(&RSA_PKCS1_2048_8192_SHA256, format!("{h}.{c}").as_bytes(), &decode(s)?).is_err() {
-        bail!("this sign-in proof's signature doesn't verify");
-    }
-    let claims: Claims = serde_json::from_slice(&decode(c)?).map_err(|_| bad())?;
+    let claims: Claims = serde_json::from_slice(&signed_claims(jws, TYPE, "sign-in proof", MAX_LEN, keys)?)
+        .map_err(|_| anyhow!("this sign-in proof is damaged"))?;
     if claims.iss != ISSUER || claims.aud != AUDIENCE {
         bail!("this sign-in proof isn't from Reason Network");
     }
@@ -174,6 +155,36 @@ fn verify_with(jws: &str, endpoint: &EndpointId, now: i64, keys: &[(String, Key)
         bail!("this sign-in proof's name isn't a valid name");
     }
     Ok(p)
+}
+
+/// The claims of `jws`, a compact JWS of type `typ` (a `what`, in errors) that one of Reason's keys signed, unparsed.
+/// What else they must say is the caller's to check.
+pub fn verify_signed(jws: &str, typ: &str, what: &str, max_len: usize) -> Result<Vec<u8>> {
+    signed_claims(jws, typ, what, max_len, trusted())
+}
+
+fn signed_claims(jws: &str, typ: &str, what: &str, max_len: usize, keys: &[(String, Key)]) -> Result<Vec<u8>> {
+    let bad = || anyhow!("this {what} is damaged");
+    if jws.len() > max_len {
+        bail!("this {what} is too long");
+    }
+    let mut parts = jws.trim().split('.');
+    let (Some(h), Some(c), Some(s), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return Err(bad());
+    };
+    let decode = |p: &str| BASE64URL_NOPAD.decode(p.as_bytes()).map_err(|_| bad());
+    let header: Header = serde_json::from_slice(&decode(h)?).map_err(|_| bad())?;
+    // RS256 only: never `none`, nor HS256 with the public key taken for a shared secret.
+    if header.alg != "RS256" || header.typ != typ {
+        bail!("not a Reason Network {what}");
+    }
+    let Some((_, key)) = keys.iter().find(|(kid, _)| *kid == header.kid) else {
+        bail!("this {what} is signed with a key this version doesn't know (update Reason Network)");
+    };
+    if key.verify(&RSA_PKCS1_2048_8192_SHA256, format!("{h}.{c}").as_bytes(), &decode(s)?).is_err() {
+        bail!("this {what}'s signature doesn't verify");
+    }
+    decode(c)
 }
 
 #[cfg(test)]

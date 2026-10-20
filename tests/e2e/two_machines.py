@@ -160,8 +160,9 @@ out = cli("alice", "team")
 check("joiner sees alex connected, verified", re.search(r"alex \(verified\)\s+laptop\s+(direct|relay)", out) is not None, out)
 out = cli("alex", "team")
 check("founder sees alice connected, verified", re.search(r"alice \(verified\)\s+desktop\s+(direct|relay)", out) is not None, out)
-check("a team without a relay of its own is on Reason's: the link names it as where alex is",
-      link_relays(link.group(1)) == ["", "https://relay-sfo1.compute.reasonmachines.com/"] and "(Reason's, the default)" in out, out)
+check("a team without a relay of its own is on Reason's: the link names the one alex is on",
+      link_relays(link.group(1))[0] == "" and re.fullmatch(r"https://relay-\w+\.compute\.reasonmachines\.com/", link_relays(link.group(1))[1])
+      and "relay: Reason's (the default)" in out, out)
 j = as_json(cli("alex", "team", "--json"))
 check("team --json marks people verified, and each machine's proof", [(m["verified"], m["has_proof"]) for m in j.get("members", [])] == [(True, True)] * 2
       and j.get("link", "").startswith("https://") and j.get("team_name") == "vibes" and len(j.get("team_id", "")) == 32, j)

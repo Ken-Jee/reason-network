@@ -36,7 +36,8 @@ const MAX_FRAME: usize = 4 << 20;
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Two machines that dial each other at once open their connections within this long of each other.
 const DIALED_TOGETHER: Duration = Duration::from_secs(5);
-/// The relays of a team that doesn't run its own: Reason's. n0's public ones are rate-limited and meant for testing.
+/// The relay of a team that doesn't run its own while this machine has no list of Reason's relays (see `relays`).
+/// n0's public ones are rate-limited and meant for testing.
 pub const DEFAULT_RELAYS: &[&str] = &["https://relay-sfo1.compute.reasonmachines.com"];
 
 pub fn default_relays() -> Vec<RelayUrl> {
@@ -140,7 +141,8 @@ pub async fn bind(key: SecretKey, relay: Option<&str>, lan: bool) -> Result<Endp
     let Some(url) = relay else {
         // The default relays, with n0's address lookup still: that is how a teammate on an older Reason Network (on
         // n0's relays) and this machine find each other, and what four-word codes need.
-        let mut b = Endpoint::builder(presets::N0).secret_key(key).relay_mode(RelayMode::custom(default_relays()));
+        let relays = crate::relays::current_or_fetch().await;
+        let mut b = Endpoint::builder(presets::N0).secret_key(key).relay_mode(RelayMode::custom(relays));
         if lan {
             b = b.address_lookup(MdnsAddressLookup::builder());
         }
@@ -392,7 +394,7 @@ impl Net {
             )),
             invites: Default::default(),
             endpoint,
-            relays: relay.map_or_else(default_relays, |u| u.parse().into_iter().collect()),
+            relays: relay.map_or_else(crate::relays::current, |u| u.parse().into_iter().collect()),
             daemon: Arc::downgrade(daemon),
             links: Default::default(),
             remote: Mutex::new(remote),

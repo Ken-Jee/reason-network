@@ -71,6 +71,7 @@ pub async fn run(service: bool) -> Result<()> {
         tokio::spawn(daemon.clone().relay_loop());
     }
     tokio::spawn(crate::migrate::run(log));
+    tokio::spawn(daemon.clone().relays_loop());
     if update::allowed(daemon.cfg.auto_update) {
         tokio::spawn(daemon.clone().update_loop());
     }
@@ -319,6 +320,16 @@ impl Daemon {
                 Value::Null
             }
         })
+    }
+
+    /// Keeps Reason's relay list fresh, unless the team runs its own relay. A new list applies at the next start.
+    async fn relays_loop(self: Arc<Self>) {
+        loop {
+            if self.team_state().is_none_or(|t| t.meta.body.relay.is_none()) {
+                crate::relays::refresh().await;
+            }
+            tokio::time::sleep(crate::relays::EVERY).await;
+        }
     }
 
     /// Exits shortly (after the reply goes out). The service manager, or the next client, starts a fresh

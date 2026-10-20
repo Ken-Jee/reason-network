@@ -15,6 +15,7 @@ mod net;
 mod paths;
 mod proof;
 mod proto;
+mod relays;
 mod render;
 mod setup;
 mod store;
@@ -231,7 +232,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Use your own iroh relay for the team, so its machines never contact n0 (or `default` for Reason's relay)
+    /// Use your own iroh relay for the team, so its machines never contact n0 (or `default` for Reason's relays)
     Relay { url: String },
     /// List messages waiting for your approval (when `inbound` is `hold`)
     Held,
