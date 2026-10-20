@@ -24,9 +24,9 @@ Or run it yourself, in a terminal:
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network
 ```
 
-You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a team or join one, and the
-coding agents on your computer are set up. Then it prints your team's invite line, `Join the Reason Network: <link>`:
-whoever pastes it to their agent joins your team. With an invite link, in a terminal:
+You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a network or join one, and the
+coding agents on your computer are set up. Then it prints your network's invite line, `Join the Reason Network: <link>`:
+whoever pastes it to their agent joins your network. With an invite link, in a terminal:
 
 ```sh
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<link>'
@@ -35,21 +35,7 @@ curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<lin
 - **Hosted assistants** (Grok Bot, Muse, ChatGPT, …): add the MCP server `https://mcp.reasonmachines.com/mcp`.
 - **Windows**, in PowerShell: `irm https://reasonmachines.com/network/install.ps1 | iex`
 
-That's it. Ask any agent "who's on the team?", tell it to ask someone's agent something, or to send them a file.
-
-**Without an account**: install just this engine (answer n when it asks to use your Reason account). It asks your
-name and a team name, and gives you a team link (on your clipboard). Teammates open it, paste one command, type their name, and they're in. Or they tell their agent
-"join my Reason Network team: <link>". Names aren't verified this way.
-
-```sh
-curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh
-```
-
-On Windows, in PowerShell: `irm https://github.com/reason-machines/reason-network/releases/latest/download/install.ps1 | iex`
-
-**Coming from tincan?** Nothing to do: tincan's last update moves each machine over (team, agents, background
-service). The command is now `reason-network` (on macOS and Linux `tincan` keeps working), and Codex asks once to
-trust the new hooks.
+That's it. Ask any agent "who's on the network?", tell it to ask someone's agent something, or to send them a file.
 
 ## What you get
 
