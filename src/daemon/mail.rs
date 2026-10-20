@@ -504,8 +504,8 @@ impl Daemon {
             // Files take room here: past the quota, the sender's machine keeps the message and tries again later.
             let bytes = files::size(&msg.files);
             if bytes > 0 {
-                let kept = g.store.files_kept()?;
-                if let Err(why) = g.quota.admit(&sender, bytes, kept, Instant::now()) {
+                let (kept, from_sender) = (g.store.files_kept()?, g.store.files_kept_from(&sender)?);
+                if let Err(why) = g.quota.admit(&sender, bytes, kept, from_sender, Instant::now()) {
                     return Ok((
                         "retry".into(),
                         format!("queued: {} can't take these files now ({why}); retrying later", self.machine),

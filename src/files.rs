@@ -28,6 +28,8 @@ pub const KEEP_UNREAD_MS: i64 = 7 * 86_400_000;
 /// hour. Past either, a teammate's machine is asked to retry later.
 pub const QUOTA_TOTAL: usize = 100 * 1024 * 1024;
 pub const QUOTA_SENDER_HOUR: usize = 20 * 1024 * 1024;
+/// And keeps at most this much from one person, so no teammate can take all of it.
+pub const QUOTA_SENDER_KEPT: usize = 25 * 1024 * 1024;
 
 const TEXT_ONLY: &str = "only text files can be sent (markdown, source code, JSON, logs, config)";
 
@@ -42,13 +44,18 @@ pub struct Confine {
 impl Confine {
     pub fn new(root: &Path, home: &Path, state: &Path) -> Result<Confine> {
         let root = std::fs::canonicalize(root).map_err(|_| anyhow!("can't find this session's folder"))?;
-        if root.parent().is_none() {
-            bail!("this session has no folder of its own to send files from");
+        let real_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        // The home folder, or a folder holding it (`/`, `/Users`), is everything the person has, not a project.
+        if root.parent().is_none() || real_home.starts_with(&root) {
+            bail!(
+                "this session works in {}, not a project folder: start the session in a project folder to send files",
+                root.display()
+            );
         }
-        let forbidden = [home.join(".config"), home.join(".ssh"), home.join(".aws"), state.to_path_buf()]
-            .iter()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-            .collect();
+        let mut refused =
+            vec![home.join(".config"), home.join(".ssh"), home.join(".aws"), home.join("Library"), state.to_path_buf()];
+        refused.extend(["APPDATA", "LOCALAPPDATA"].iter().filter_map(std::env::var_os).map(PathBuf::from));
+        let forbidden = refused.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
         Ok(Confine { root, forbidden })
     }
 
@@ -358,13 +365,26 @@ pub struct Quota {
 }
 
 impl Quota {
-    /// Takes `bytes` of files from `sender`, with `kept` bytes of teammates' files on this machine already, or says why
-    /// not (a teammate's machine retries later).
-    pub fn admit(&mut self, sender: &str, bytes: usize, kept: usize, now: Instant) -> Result<(), String> {
+    /// Takes `bytes` of files from `sender`, with `kept` bytes of teammates' files on this machine already (`from_sender`
+    /// of them that person's), or says why not (a teammate's machine retries later).
+    pub fn admit(
+        &mut self,
+        sender: &str,
+        bytes: usize,
+        kept: usize,
+        from_sender: usize,
+        now: Instant,
+    ) -> Result<(), String> {
         if kept + bytes > QUOTA_TOTAL {
             return Err(format!(
                 "it keeps {} MB of teammates' files at most and has that many now; it takes these once some are read",
                 QUOTA_TOTAL >> 20
+            ));
+        }
+        if from_sender + bytes > QUOTA_SENDER_KEPT {
+            return Err(format!(
+                "it keeps {} MB of files from {sender} at most and has that many now; it takes these once some are read",
+                QUOTA_SENDER_KEPT >> 20
             ));
         }
         let q = self.recent.entry(sender.to_string()).or_default();
@@ -556,13 +576,23 @@ mod tests {
             let e = read_within(&[p.to_string()], &repo, &confine).unwrap_err().to_string();
             assert!(e.contains(want), "{p}: {e}");
         }
-        // Working in the home folder itself: its hidden folders and the state stay out of reach.
-        let at_home = Confine::new(&home, &home, &home.join("src")).unwrap();
-        let e = read_within(&[".ssh/id_ed25519".into()], &home, &at_home).unwrap_err().to_string();
-        assert!(e.contains("hidden"), "{e}");
-        let e = read_within(&["src/api/docs/plan.md".into()], &home, &at_home).unwrap_err().to_string();
+        // A session working in the home folder, or a folder above it, has no project folder: nothing is sent.
+        for root in [home.as_path(), d.as_path(), Path::new("/")] {
+            let e = Confine::new(root, &home, &state).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(e.contains("start the session in a project folder to send files"), "{}: {e}", root.display());
+        }
+        // A project folder holding the state, or ~/Library: those stay out of reach.
+        std::fs::create_dir_all(home.join("Library/Keychains")).unwrap();
+        std::fs::write(home.join("Library/Keychains/login.txt"), "keychain").unwrap();
+        let in_state = Confine::new(&home.join("src"), &home, &home.join("src/api/docs")).unwrap();
+        let e = read_within(&["api/docs/plan.md".into()], &home.join("src"), &in_state).unwrap_err().to_string();
         assert!(e.contains("Reason Network's own state"), "{e}");
-        assert!(Confine::new(Path::new("/"), &home, &state).is_err());
+        std::os::unix::fs::symlink(home.join("Library"), repo.join("lib")).unwrap();
+        let e = read_within(&["lib/Keychains/login.txt".into()], &repo, &confine).unwrap_err().to_string();
+        assert!(e.contains("outside this session's folder"), "{e}");
+        let library = Confine::new(&home.join("Library"), &home, &state).unwrap();
+        let e = read_within(&["Keychains/login.txt".into()], &home.join("Library"), &library).unwrap_err().to_string();
+        assert!(e.contains("credentials"), "{e}");
         // A person's own `send --file` reads anywhere.
         assert_eq!(read(&[home.join(".ssh/id_ed25519").display().to_string()], &repo).unwrap()[0].content, "key");
         std::fs::remove_dir_all(&d).unwrap();
@@ -619,14 +649,18 @@ mod tests {
         let mut q = Quota::default();
         let t = Instant::now();
         let mb = 1 << 20;
-        assert!(q.admit("bob", 15 * mb, 0, t).is_ok());
-        let e = q.admit("bob", 6 * mb, 15 * mb, t).unwrap_err();
+        assert!(q.admit("bob", 15 * mb, 0, 0, t).is_ok());
+        let e = q.admit("bob", 6 * mb, 15 * mb, 15 * mb, t).unwrap_err();
         assert!(e.contains("20 MB of files an hour from bob"), "{e}");
         // Another teammate has their own hour; an hour later bob has his again.
-        assert!(q.admit("alice", 6 * mb, 15 * mb, t).is_ok());
-        assert!(q.admit("bob", 6 * mb, 21 * mb, t + Duration::from_secs(3601)).is_ok());
-        let e = q.admit("carol", mb, QUOTA_TOTAL, t).unwrap_err();
+        assert!(q.admit("alice", 6 * mb, 15 * mb, 0, t).is_ok());
+        assert!(q.admit("bob", 6 * mb, 21 * mb, 15 * mb, t + Duration::from_secs(3601)).is_ok());
+        let e = q.admit("carol", mb, QUOTA_TOTAL, 0, t).unwrap_err();
         assert!(e.contains("100 MB of teammates' files at most"), "{e}");
+        // Nor does one teammate keep more than 25 MB of it, however slowly sent.
+        let e = q.admit("bob", 5 * mb, 21 * mb, 21 * mb, t + Duration::from_secs(7300)).unwrap_err();
+        assert!(e.contains("25 MB of files from bob at most"), "{e}");
+        assert!(q.admit("dave", 5 * mb, 21 * mb, 0, t + Duration::from_secs(7300)).is_ok());
     }
 
     #[test]

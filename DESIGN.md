@@ -135,7 +135,7 @@ hours after the daemon starts, while live sessions register again).
 UTF-8 with no control characters but tab and line ends), inside the same envelope, so they are as authenticated as its
 text. The sender's client reads them from paths on its computer: a person's `send --file` from anywhere, an agent's
 `send_message` only from its own folder (its repository, or where it works; links resolved), none of that folder's
-hidden files or folders, and nothing under `~/.config`, `~/.ssh`, `~/.aws` or the state home, so a prompt-injected agent
+hidden files or folders, and nothing under `~/.config`, `~/.ssh`, `~/.aws`, `~/Library`, `%APPDATA%`, `%LOCALAPPDATA%` or the state home (a session working in the home folder or above it sends none), so a prompt-injected agent
 can't mail out what its harness wouldn't let it read. Both daemons hold them to the limits and reduce each name to a
 plain file name (no separators or `..`, no leading dot or dash, nothing invisible, no Windows device names such as
 `CON`, `COM¹` or `CONIN$`, at most 100 characters and 200 bytes, distinct within the message, defanged like message
@@ -146,7 +146,7 @@ folds into one already there gets `-2`), and lists their paths after the message
 them. A held message's files are saved only once it is approved (one that can't be saved stays held); a refused one's
 never are. They go with their message: when it is forgotten, a day after it was read, or a week after they came while it
 is unread; a message held a week with files goes. A machine keeps at most 100 MB of teammates' files (saved and held)
-and takes at most 20 MB an hour from one person; past either, the sender's machine is told to retry later and keeps the
+keeps at most 25 MB from one person, and takes at most 20 MB an hour from one person; past either, the sender's machine is told to retry later and keeps the
 message in its outbox. A machine's presence lists `features: ["files"]` when its engine takes them; an older engine
 would drop the field without a word, so for a machine that doesn't say so, the files are written out in the text as
 fenced blocks when that fits the 64 KB body limit, and the message is refused for that recipient otherwise.

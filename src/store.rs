@@ -212,6 +212,13 @@ impl Store {
         Ok(self.db.query_row(sql, [], |r| r.get::<_, i64>(0))?.max(0) as usize)
     }
 
+    /// The same, of files from `person`'s sessions.
+    pub fn files_kept_from(&self, person: &str) -> Result<usize> {
+        let sql = "SELECT COALESCE(SUM(json_extract(files, '$.bytes')), 0) FROM messages
+                   WHERE files IS NOT NULL AND substr(sender, 1, length(?1) + 1) = ?1 || '/'";
+        Ok(self.db.query_row(sql, [person], |r| r.get::<_, i64>(0))?.max(0) as usize)
+    }
+
     /// Lets files go: a day after their message was read, a week after they came while it is unread (the message stays,
     /// without them), and a message held a week with files goes altogether. Then deletes every folder in the inbox
     /// folder that no kept message names.
@@ -691,6 +698,8 @@ mod tests {
         // What they take counts against the quota: saved or held.
         let one = files::size(&with_files("x", "y").files);
         assert_eq!(store.files_kept().unwrap(), 5 * one);
+        // Counted per sending person too (`sven/claude` sent them all; `sv` is someone else).
+        assert_eq!((store.files_kept_from("sven").unwrap(), store.files_kept_from("sv").unwrap()), (5 * one, 0));
         // The unread mail of a session forgotten after a day goes, and its files with it.
         store.forget_sessions(i64::MAX, &HashSet::from(["api"]), "lars").unwrap();
         assert!(!folder(&gone).exists());
