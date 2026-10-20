@@ -34,7 +34,9 @@ pub struct Proof {
     pub exp: i64,
 }
 
+/// Exactly these fields: anything else, `crit` included, is refused (RFC 7515: a `crit` not understood must be).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Header {
     alg: String,
     kid: String,
@@ -305,5 +307,27 @@ pub(crate) mod tests {
             assert!(verify(&big, &me).unwrap_err().to_string().contains("too long"));
             assert!(t.elapsed() < std::time::Duration::from_millis(50), "{:?}", t.elapsed());
         }
+    }
+
+    #[test]
+    fn the_header_has_exactly_alg_kid_and_typ() {
+        let me = SecretKey::generate().public();
+        let c = claims("user_1", "alex", &me);
+        for header in [
+            json!({"alg": "EdDSA", "kid": KID, "typ": TYPE, "crit": ["exp"], "exp": 1}),
+            json!({"alg": "EdDSA", "kid": KID, "typ": TYPE, "jku": "https://evil.example/keys.json"}),
+            json!({"alg": "EdDSA", "kid": KID}),
+        ] {
+            let jws = sign_with(&signer(), header.clone(), c.clone());
+            assert!(verify(&jws, &me).unwrap_err().to_string().contains("damaged"), "{header}");
+            assert!(verify_ignoring_expiry(&jws, &me).is_err(), "{header}");
+        }
+        // A key twice is refused too.
+        let h =
+            BASE64URL_NOPAD.encode(format!(r#"{{"alg":"EdDSA","kid":"zzz","kid":"{KID}","typ":"{TYPE}"}}"#).as_bytes());
+        let body = BASE64URL_NOPAD.encode(&serde_json::to_vec(&c).unwrap());
+        let input = format!("{h}.{body}");
+        let jws = format!("{input}.{}", BASE64URL_NOPAD.encode(&signer().sign(input.as_bytes()).to_bytes()));
+        assert!(verify(&jws, &me).is_err());
     }
 }
