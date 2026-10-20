@@ -116,7 +116,20 @@ The link secret is a reusable invite in the team state (any member can show the 
 redeem it), replaced with `reason-network link --new` and whenever someone is removed; removed machines are never sent it.
 The page shows one command (`curl … install.sh | sh -s -- <ticket>`); the joiner only types a name. Four-word
 one-time codes (`reason-network invite --code`, ~41 bits) derive a temporary iroh key the inviting machine listens on, for
-reading out loud or adding your own machines.
+reading out loud or adding your own machines. A code doesn't name the team, so the joiner checks the team it is handed
+holds the code's invite, signed by a member and used by the joiner. Links are `rn1-…` (older builds wrote `tincan1…`,
+with the same payload; both are read). After `init` and `join` the CLI prints the invite line,
+`Join the Reason Network: <team link>`, and agents get it from `list_team`.
+
+**Sign-in proofs.** Signed in with Reason, a machine carries a proof: a compact JWS (Ed25519) from Reason saying
+this endpoint id belongs to account `sub`, named `name`, until `exp` (`init`/`join --proof`, `reason-network proof`
+to refresh). The engine checks it against Reason's public keys, compiled in, and never calls Reason. Proofs travel in
+the team state's `attestations` (endpoint → JWS), outside the signed entries, so builds without them pass the rest
+on unchanged; each machine checks every proof itself and drops the ones that don't verify. A person whose machine
+has a valid proof for their name shows as verified. With a proof, the name is the proof's; a verified name can't be
+taken by anyone but another computer of the same account (which any member may let in through the team link).
+`--json` on `init`, `join`, `link` and `team` is for the Reason CLI, which signs people in; a taken name is
+`{"error":"name_taken"}`.
 
 **Presence and directory.** Daemons keep a connection to every online member (full mesh; fine to ~50
 machines). On connect they exchange roster heads (anti-entropy) and full presence. On any local change a

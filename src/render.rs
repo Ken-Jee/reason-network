@@ -76,14 +76,14 @@ pub fn directory(d: &Directory, agent: bool, paint: Paint) -> String {
             rows.into_iter().partition(|&i| agent && d.sessions[i].tier == Tier::None);
         if rows.is_empty() && unreachable.is_empty() {
             if agent {
-                quiet.push(format!("{} · {} ({})", m.person, m.machine, link(m, now)));
+                quiet.push(format!("{} · {} ({})", person(m), m.machine, link(m, now)));
                 continue;
             }
             let _ = writeln!(out, "\n{}  {}", header(m, now, paint), paint.on(DIM, "no sessions"));
             continue;
         }
         if agent {
-            let _ = writeln!(out, "{} · {} · {}", m.person, m.machine, link(m, now));
+            let _ = writeln!(out, "{} · {} · {}", person(m), m.machine, link(m, now));
         } else {
             let _ = writeln!(out, "\n{}", header(m, now, paint));
         }
@@ -111,6 +111,9 @@ pub fn directory(d: &Directory, agent: bool, paint: Paint) -> String {
     if !quiet.is_empty() {
         let _ = writeln!(out, "no sessions: {}", quiet.join(", "));
     }
+    if agent && let Some(line) = &d.invite_line {
+        let _ = writeln!(out, "Invite people with this line: {line}");
+    }
     if !d.sessions.is_empty() {
         if agent {
             out.push_str(
@@ -130,7 +133,12 @@ pub fn directory(d: &Directory, agent: bool, paint: Paint) -> String {
 /// `● alice · xps · direct 4ms`: a green dot while the machine is online.
 fn header(m: &MachineInfo, now: i64, paint: Paint) -> String {
     let dot = if m.is_me || m.online { paint.on(GREEN, "●") } else { paint.on(DIM, "○") };
-    format!("{dot} {} {}", paint.on(BOLD, &format!("{} · {} ·", m.person, m.machine)), link_painted(m, now, paint))
+    format!("{dot} {} {}", paint.on(BOLD, &format!("{} · {} ·", person(m), m.machine)), link_painted(m, now, paint))
+}
+
+/// The person's name, marked when Reason verified it.
+fn person(m: &MachineInfo) -> String {
+    if m.verified { format!("{} (verified)", m.person) } else { m.person.clone() }
 }
 
 struct Layout {
@@ -198,10 +206,10 @@ pub fn team(t: &TeamInfo) -> String {
     let mut out = String::new();
     let relay = t.relay.as_deref().unwrap_or("n0 public relays");
     let _ = writeln!(out, "team {} · relay: {relay}", t.name);
-    let pw = t.machines.iter().map(|m| m.person.chars().count()).max().unwrap_or(0);
+    let pw = t.machines.iter().map(|m| person(m).chars().count()).max().unwrap_or(0);
     let mw = t.machines.iter().map(|m| m.machine.chars().count()).max().unwrap_or(0);
     for m in &t.machines {
-        let _ = writeln!(out, "  {:pw$}  {:mw$}  {}", m.person, m.machine, link(m, now));
+        let _ = writeln!(out, "  {:pw$}  {:mw$}  {}", person(m), m.machine, link(m, now));
     }
     out
 }

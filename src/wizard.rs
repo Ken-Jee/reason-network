@@ -33,7 +33,7 @@ fn name_ok(s: &str) -> Result<(), &'static str> {
 }
 
 fn invite_ok(s: &str) -> Result<(), &'static str> {
-    if s.contains("tincan1") || invite::normalize(s).is_some() {
+    if crate::team::Ticket::is_ticket(s) || invite::normalize(s).is_some() {
         Ok(())
     } else {
         Err("paste the team link your friend sent")
@@ -84,7 +84,7 @@ pub async fn onboard(
         let sp = spinner();
         sp.start("Creating the team...");
         let t: TeamInfo = link
-            .call(Request::CreateTeam { name, person, relay: None })
+            .call(Request::CreateTeam { name, person, relay: None, proof: None })
             .await
             .inspect_err(|e| sp.error(format!("{e:#}")))?;
         crate::wait_exit(crate::daemon_pid()).await;
@@ -101,7 +101,10 @@ pub async fn onboard(
             };
             let sp = spinner();
             sp.start("Joining...");
-            match link.call::<TeamInfo>(Request::Join { ticket: text.clone(), person: person.clone() }).await {
+            match link
+                .call::<TeamInfo>(Request::Join { ticket: text.clone(), person: person.clone(), proof: None })
+                .await
+            {
                 Ok(t) => {
                     crate::wait_exit(crate::daemon_pid()).await;
                     sp.stop(format!("Joined team {} as {} on {}.", t.name, t.person, t.machine));

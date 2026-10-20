@@ -61,6 +61,9 @@ pub struct JoinRequest {
     pub secret: String,
     pub person: String,
     pub machine: String,
+    /// The joiner's Reason sign-in proof. Builds before proofs ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

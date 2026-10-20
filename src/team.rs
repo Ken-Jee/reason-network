@@ -2,7 +2,10 @@
 //! signed by a member machine's key. Any member can add or remove machines and issue invites; entries merge
 //! last-writer-wins by timestamp. Built for a team of friends who trust each other, not adversarial members.
 
-use crate::util;
+use crate::{
+    proof::{self, Proof},
+    util,
+};
 use anyhow::{Result, anyhow, bail};
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use iroh::{EndpointAddr, EndpointId, SecretKey, Signature};
@@ -93,6 +96,10 @@ pub struct TeamState {
     pub invites: BTreeMap<String, Signed<Invite>>,
     #[serde(default)]
     pub link: Option<Signed<Link>>,
+    /// Each machine's Reason sign-in proof (a JWS, see [`crate::proof`]), by endpoint id. It signs itself, so it stays
+    /// out of the signed entries, and builds that don't know it pass the rest of the state on unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attestations: BTreeMap<String, String>,
 }
 
 /// Entries stamped further ahead than this are refused (a broken clock, or worse).
@@ -126,6 +133,7 @@ impl TeamState {
             members: BTreeMap::new(),
             invites: BTreeMap::new(),
             link: None,
+            attestations: BTreeMap::new(),
         };
         state.put_member(key, key.public(), person, machine, true);
         state.new_link(key);
@@ -162,10 +170,37 @@ impl TeamState {
         TeamState { link: None, invites: BTreeMap::new(), ..self.clone() }
     }
 
-    /// Whether `endpoint` may be an active machine of `person`, on `signer`'s word.
+    /// Whether `endpoint` may be an active machine of `person`, on `signer`'s word: one of the person's machines vouches
+    /// for it, nobody else has the name, or Reason says it belongs to the account the name is verified for.
     fn may_take(&self, person: &str, endpoint: &EndpointId, signer: &EndpointId) -> bool {
         self.active().any(|m| m.endpoint == *signer && m.person == person)
             || !self.active().any(|m| m.person == person && m.endpoint != *endpoint)
+            || self
+                .proof(endpoint)
+                .is_some_and(|p| p.name == person && self.verified_people().get(person) == Some(&p.sub))
+    }
+
+    /// The machine's sign-in proof, if it has one that verifies now.
+    pub fn proof(&self, endpoint: &EndpointId) -> Option<Proof> {
+        proof::verify(self.attestations.get(&endpoint.to_string())?, endpoint).ok()
+    }
+
+    /// Verified people: each name an active machine's proof is for, with the Reason account it belongs to.
+    pub fn verified_people(&self) -> HashMap<String, String> {
+        self.active()
+            .filter_map(|m| self.proof(&m.endpoint).filter(|p| p.name == m.person))
+            .map(|p| (p.name, p.sub))
+            .collect()
+    }
+
+    /// Records `endpoint`'s sign-in proof, if it verifies and is newer than the one it has; true if it was taken.
+    pub fn attest(&mut self, endpoint: &EndpointId, jws: &str) -> bool {
+        let Ok(p) = proof::verify(jws, endpoint) else { return false };
+        if self.proof(endpoint).is_some_and(|cur| cur.iat >= p.iat) {
+            return false;
+        }
+        self.attestations.insert(endpoint.to_string(), jws.trim().to_string());
+        true
     }
 
     pub fn name(&self) -> &str {
@@ -248,8 +283,16 @@ impl TeamState {
         self.invites.get(&hash(secret)).is_some_and(|i| i.body.used_by.is_none() && i.body.expires > util::now_ms())
     }
 
-    /// Checks that `secret` admits `person`, and marks the invite used by `joiner`.
-    pub fn redeem(&mut self, key: &SecretKey, secret: &str, person: &str, joiner: EndpointId) -> Result<()> {
+    /// Checks that `secret` admits `person` (with the joiner's verified sign-in proof, if any), and marks the invite
+    /// used by `joiner`.
+    pub fn redeem(
+        &mut self,
+        key: &SecretKey,
+        secret: &str,
+        person: &str,
+        joiner: EndpointId,
+        proof: Option<&Proof>,
+    ) -> Result<()> {
         let h = hash(secret);
         let signed = self.invites.get(&h).ok_or_else(|| anyhow!("unknown invite"))?;
         let (inv, signer) = (signed.body.clone(), signed.by);
@@ -276,6 +319,8 @@ impl TeamState {
                 bail!("only one of {p}'s machines can let this one in; try again while one is online")
             }
             Some(_) => {}
+            // Another computer of the account the name is verified for may join under it.
+            None if proof.is_some_and(|p| p.name == person && self.verified_people().get(person) == Some(&p.sub)) => {}
             None if self.active().any(|m| m.person == person && m.endpoint != joiner) => {
                 bail!("'{person}' is already in this team; join with another name (--as)")
             }
@@ -294,7 +339,16 @@ impl TeamState {
             bail!("state from a different team");
         }
         let mut changed = false;
-        // Admissions first: they decide who may sign everything else. One admission can vouch for the signer of
+        // Proofs check themselves; they come before members, whose names they can vouch for (`may_take`).
+        for (k, jws) in &other.attestations {
+            if let Ok(id) = k.parse::<EndpointId>()
+                && self.attestations.get(k) != Some(jws)
+                && self.attest(&id, jws)
+            {
+                changed = true;
+            }
+        }
+        // Then admissions: they decide who may sign everything else. One admission can vouch for the signer of
         // another, so repeat until nothing new lands.
         loop {
             let admitted = self.admitted();
@@ -390,6 +444,7 @@ impl TeamState {
             members: BTreeMap::new(),
             invites: BTreeMap::new(),
             link: None,
+            attestations: BTreeMap::new(),
         };
         s.merge(other)?;
         let admitted = s.admitted();
@@ -428,8 +483,10 @@ pub struct Ticket {
     pub peers: Vec<EndpointId>,
 }
 
-/// Wire format shared with every peer (and earlier builds): never change it.
-const TICKET_PREFIX: &str = "tincan1";
+/// What a ticket starts with. The payload after it is shared with every peer (and earlier builds): never change it.
+const TICKET_PREFIX: &str = "rn1-";
+/// What earlier builds wrote: still read.
+const OLD_TICKET_PREFIX: &str = "tincan1";
 /// In place of a length: an n0 relay, given by its region (`use1-1` for `https://use1-1.relay.n0.iroh.link./`).
 const N0_RELAY: u8 = 0xFF;
 const N0_RELAY_SUFFIX: &str = ".relay.n0.iroh.link./";
@@ -452,7 +509,7 @@ fn n0_relay(url: &str) -> Option<&str> {
 }
 
 impl Ticket {
-    /// `tincan1` + base64url of: team id (16 bytes), secret (16), name, team relay, first peer's relay hint (each
+    /// `rn1-` + base64url of: team id (16 bytes), secret (16), name, team relay, first peer's relay hint (each
     /// length-prefixed, 0 for none), its address hints (count, then family 4/6, address, port), then 32 bytes per
     /// member key.
     pub fn encode(&self) -> String {
@@ -493,9 +550,17 @@ impl Ticket {
         format!("{TICKET_PREFIX}{}", BASE64URL_NOPAD.encode(&b))
     }
 
+    /// Whether `text` holds a team link or ticket (it may not be a whole one).
+    pub fn is_ticket(text: &str) -> bool {
+        text.contains(TICKET_PREFIX) || text.contains(OLD_TICKET_PREFIX)
+    }
+
     pub fn decode(s: &str) -> Result<Self> {
         let s = s.trim().rsplit('#').next().unwrap_or_default();
-        let data = s.strip_prefix(TICKET_PREFIX).ok_or_else(|| anyhow!("not a Reason Network invite"))?;
+        let data = s
+            .strip_prefix(TICKET_PREFIX)
+            .or_else(|| s.strip_prefix(OLD_TICKET_PREFIX))
+            .ok_or_else(|| anyhow!("not a Reason Network invite"))?;
         let b =
             BASE64URL_NOPAD.decode(data.as_bytes()).map_err(|_| anyhow!("this invite is damaged (was it cut off?)"))?;
         let damaged = || anyhow!("this invite is damaged (was it cut off?)");
@@ -613,17 +678,17 @@ mod tests {
         sa.invite(&a, &secret, 24, None);
 
         // b joins through a: a redeems and adds b; b verifies what it receives.
-        sa.redeem(&a, &secret, "alice", b.public()).unwrap();
+        sa.redeem(&a, &secret, "alice", b.public(), None).unwrap();
         sa.put_member(&a, b.public(), "alice", "xps", true);
         let mut sb = TeamState::verified(&sa).unwrap();
         assert_eq!(sb, sa);
         assert!(sb.is_active(&b.public()));
-        assert!(sa.redeem(&a, &secret, "eve", c.public()).is_err(), "invites are single use");
+        assert!(sa.redeem(&a, &secret, "eve", c.public(), None).is_err(), "invites are single use");
 
         // b invites c; a learns about c by merging b's copy.
         let s2 = random_secret();
         sb.invite(&b, &s2, 1, None);
-        sb.redeem(&b, &s2, "sam", c.public()).unwrap();
+        sb.redeem(&b, &s2, "sam", c.public(), None).unwrap();
         sb.put_member(&b, c.public(), "sam", "nuc", true);
         assert!(sa.merge(&sb).unwrap());
         assert!(sa.is_active(&c.public()));
@@ -673,7 +738,7 @@ mod tests {
         s.put_member(&f, f.public(), "alex", "mbp", false); // founder leaves
         let secret = random_secret();
         s.invite(&b, &secret, 24, None);
-        s.redeem(&b, &secret, "sam", d.public()).unwrap();
+        s.redeem(&b, &secret, "sam", d.public(), None).unwrap();
         s.put_member(&b, d.public(), "sam", "nuc", true);
         let sd = TeamState::verified(&s).unwrap();
         assert!(sd.is_active(&d.public()) && sd.is_active(&b.public()) && !sd.is_active(&f.public()));
@@ -698,7 +763,7 @@ mod tests {
         // A newcomer sees the same, including c (admitted by b, who is gone now).
         let secret = random_secret();
         x.invite(&f, &secret, 24, None);
-        x.redeem(&f, &secret, "dee", d.public()).unwrap();
+        x.redeem(&f, &secret, "dee", d.public(), None).unwrap();
         x.put_member(&f, d.public(), "dee", "pi", true);
         let z = TeamState::verified(&x).unwrap();
         assert!(z.is_active(&c.public()) && !z.is_active(&b.public()));
@@ -724,14 +789,14 @@ mod tests {
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let first = random_secret();
         s.invite(&a, &first, 24, None);
-        s.redeem(&a, &first, "alice", b.public()).unwrap();
+        s.redeem(&a, &first, "alice", b.public(), None).unwrap();
         s.put_member(&a, b.public(), "alice", "xps", true);
-        assert!(s.redeem(&a, &first, "alice", b.public()).is_ok(), "a retry by the same machine is fine");
+        assert!(s.redeem(&a, &first, "alice", b.public(), None).is_ok(), "a retry by the same machine is fine");
         let from_b = random_secret();
         s.invite(&b, &from_b, 720, None);
         s.put_member(&a, b.public(), "alice", "xps", false);
-        assert!(s.redeem(&a, &first, "alice", b.public()).is_err(), "removed: the old invite doesn't readmit");
-        assert!(s.redeem(&a, &from_b, "sam", c.public()).is_err(), "invites by a removed machine are dead");
+        assert!(s.redeem(&a, &first, "alice", b.public(), None).is_err(), "removed: the old invite doesn't readmit");
+        assert!(s.redeem(&a, &from_b, "sam", c.public(), None).is_err(), "invites by a removed machine are dead");
     }
 
     #[test]
@@ -753,11 +818,11 @@ mod tests {
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let open = random_secret();
         s.invite(&a, &open, 24, None);
-        assert!(s.redeem(&a, &open, "alex", b.public()).is_err());
+        assert!(s.redeem(&a, &open, "alex", b.public(), None).is_err());
         let mine = random_secret();
         s.invite(&a, &mine, 24, Some("alex".into()));
-        assert!(s.redeem(&a, &mine, "alice", b.public()).is_err());
-        s.redeem(&a, &mine, "alex", b.public()).unwrap();
+        assert!(s.redeem(&a, &mine, "alice", b.public(), None).is_err());
+        s.redeem(&a, &mine, "alex", b.public(), None).unwrap();
     }
 
     #[test]
@@ -765,7 +830,7 @@ mod tests {
         let (a, b, fake, mine) = (key(), key(), key(), key());
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let link = s.link_secret().unwrap().to_string();
-        s.redeem(&a, &link, "alice", b.public()).unwrap();
+        s.redeem(&a, &link, "alice", b.public(), None).unwrap();
         s.put_member(&a, b.public(), "alice", "xps", true);
         // alice's machine signs a new machine in as alex, on its copy, and sends it over.
         let mut evil = s.clone();
@@ -803,6 +868,7 @@ mod tests {
         assert_eq!(Ticket::decode(&format!("https://example.com/join/#{enc}")).unwrap(), t, "a whole link works too");
         assert!(Ticket::decode(&enc[..enc.len() - 10]).is_err());
         assert!(Ticket::decode("tincan1!!!").is_err());
+        assert!(Ticket::decode("rn1-!!!").is_err());
         assert!(Ticket::decode("hello").is_err());
     }
 
@@ -828,7 +894,7 @@ mod tests {
         }
         b.push(0);
         b.extend(a.public().as_bytes());
-        let old = format!("{TICKET_PREFIX}{}", BASE64URL_NOPAD.encode(&b));
+        let old = format!("{OLD_TICKET_PREFIX}{}", BASE64URL_NOPAD.encode(&b));
         assert!(short.len() + 30 < old.len(), "{} vs {}", short.len(), old.len());
         assert_eq!(Ticket::decode(&old).unwrap(), t);
         t.hint_relay = Some("https://relay.example.com/".into());
@@ -840,19 +906,128 @@ mod tests {
         let (a, b, c, d) = (key(), key(), key(), key());
         let mut s = TeamState::found("vibes", "alex", "mbp", &a);
         let link = s.link_secret().unwrap().to_string();
-        s.redeem(&a, &link, "alice", b.public()).unwrap();
+        s.redeem(&a, &link, "alice", b.public(), None).unwrap();
         s.put_member(&a, b.public(), "alice", "xps", true);
-        s.redeem(&a, &link, "sam", c.public()).unwrap();
+        s.redeem(&a, &link, "sam", c.public(), None).unwrap();
         s.put_member(&a, c.public(), "sam", "nuc", true);
-        assert!(s.redeem(&a, &link, "alice", d.public()).is_err(), "names stay unique");
+        assert!(s.redeem(&a, &link, "alice", d.public(), None).is_err(), "names stay unique");
         // A joiner learns the link, and can show it too.
         let joined = TeamState::verified(&s).unwrap();
         assert_eq!(joined.link_secret(), Some(link.as_str()));
         assert_eq!(s.without_secrets().link, None);
         assert!(s.without_secrets().invites.is_empty());
         s.new_link(&b);
-        assert!(s.redeem(&a, &link, "dee", d.public()).is_err(), "the old link stops working");
+        assert!(s.redeem(&a, &link, "dee", d.public(), None).is_err(), "the old link stops working");
         let fresh = s.link_secret().unwrap().to_string();
-        s.redeem(&a, &fresh, "dee", d.public()).unwrap();
+        s.redeem(&a, &fresh, "dee", d.public(), None).unwrap();
+    }
+
+    #[test]
+    fn links_are_rn1_and_tincan1_links_still_work() {
+        let t = Ticket {
+            team: "00112233445566778899aabbccddeeff".into(),
+            name: "vibes".into(),
+            secret: random_secret(),
+            relay: None,
+            hint_relay: None,
+            hint_ips: vec![],
+            peers: vec![key().public()],
+        };
+        let enc = t.encode();
+        let payload = enc.strip_prefix("rn1-").expect("emitted as rn1-");
+        for link in [
+            enc.clone(),
+            format!("https://reasonmachines.com/network/join/#{enc}"),
+            format!("tincan1{payload}"),
+            format!("https://reasonmachines.com/network/join/#tincan1{payload}"),
+        ] {
+            assert_eq!(Ticket::decode(&link).unwrap(), t, "{link}");
+        }
+        assert!(Ticket::decode(&format!("rn2-{payload}")).is_err());
+    }
+
+    fn proof(sub: &str, name: &str, k: &SecretKey) -> String {
+        crate::proof::tests::proof(sub, name, &k.public())
+    }
+
+    #[test]
+    fn proofs_mark_people_verified_and_travel_with_the_state() {
+        let (a, b) = (key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        assert!(s.attest(&a.public(), &proof("u_alex", "alex", &a)));
+        s.put_member(&a, b.public(), "alice", "xps", true);
+        // A proof for another machine, or a forged one, is refused.
+        assert!(!s.attest(&b.public(), &proof("u_alice", "alice", &a)));
+        let forged = crate::proof::tests::sign_with(
+            &key(),
+            serde_json::json!({"alg": "EdDSA", "kid": crate::proof::tests::KID, "typ": "reason-network-proof"}),
+            crate::proof::tests::claims("u_alice", "alice", &b.public()),
+        );
+        assert!(!s.attest(&b.public(), &forged));
+        assert_eq!(s.verified_people().into_iter().collect::<Vec<_>>(), [("alex".into(), "u_alex".into())]);
+        // A proof for a name the machine doesn't go by doesn't verify the person.
+        let mut other = s.clone();
+        other.attestations.insert(b.public().to_string(), proof("u_x", "bob", &b));
+        assert!(s.merge(&other).unwrap());
+        assert!(!s.verified_people().contains_key("alice") && !s.verified_people().contains_key("bob"));
+        // Peers drop proofs that don't verify.
+        let mut bad = s.clone();
+        bad.attestations.insert(a.public().to_string(), forged.clone());
+        assert!(!s.merge(&bad).unwrap());
+        assert_eq!(s.verified_people().get("alex").map(String::as_str), Some("u_alex"));
+        // A joiner gets them with the state.
+        let joined = TeamState::verified(&s).unwrap();
+        assert_eq!(joined.attestations, s.attestations);
+    }
+
+    #[test]
+    fn state_from_builds_without_proofs_merges_both_ways() {
+        let (a, b) = (key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        // Without proofs the state serializes as before them.
+        assert!(!serde_json::to_string(&s).unwrap().contains("attestations"));
+        s.attest(&a.public(), &proof("u_alex", "alex", &a));
+        // An older build reads the state, drops what it doesn't know, signs a change, and sends it back.
+        let mut json: serde_json::Value = serde_json::to_value(&s).unwrap();
+        json.as_object_mut().unwrap().remove("attestations");
+        let mut old: TeamState = serde_json::from_value(json).unwrap();
+        assert!(old.attestations.is_empty());
+        old.put_member(&a, b.public(), "alice", "xps", true);
+        assert!(s.merge(&old).unwrap());
+        assert!(
+            s.is_active(&b.public()) && s.verified_people().contains_key("alex"),
+            "the change lands, the proof stays"
+        );
+        // Our state, with proofs, verifies for it too: no signed entry changed.
+        assert!(TeamState::verified(&s).is_ok());
+    }
+
+    #[test]
+    fn a_verified_name_is_its_accounts() {
+        let (a, b, c, d) = (key(), key(), key(), key());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        s.attest(&a.public(), &proof("u_alex", "alex", &a));
+        let link = s.link_secret().unwrap().to_string();
+        let p = |sub: &str, name: &str, k: &SecretKey| crate::proof::verify(&proof(sub, name, k), &k.public()).unwrap();
+        // Another account, or no proof, can't take it.
+        let err = s.redeem(&a, &link, "alex", b.public(), Some(&p("u_mallory", "alex", &b))).unwrap_err();
+        assert!(err.to_string().contains("already in this team"), "{err}");
+        assert!(s.redeem(&a, &link, "alex", b.public(), None).is_err());
+        // Another computer of the same account can, through the team link, let in by anyone.
+        s.redeem(&a, &link, "alice", c.public(), None).unwrap();
+        s.put_member(&a, c.public(), "alice", "xps", true);
+        s.redeem(&c, &link, "alex", d.public(), Some(&p("u_alex", "alex", &d))).unwrap();
+        s.attest(&d.public(), &proof("u_alex", "alex", &d));
+        s.put_member(&c, d.public(), "alex", "mini", true);
+        let peer = TeamState::verified(&s).unwrap();
+        assert!(peer.is_active(&d.public()), "alice's machine let in alex's second computer");
+        // Without its proof, peers don't take alice's machine's word that it is alex's.
+        let mut forged = s.clone();
+        forged.attestations.remove(&d.public().to_string());
+        assert!(!TeamState::verified(&forged).unwrap().is_active(&d.public()));
+        // A name nobody verified stays with whoever has it, proof or not.
+        let e = key();
+        let err = s.redeem(&a, &link, "alice", e.public(), Some(&p("u_alice", "alice", &e))).unwrap_err();
+        assert!(err.to_string().contains("already in this team"), "{err}");
     }
 }

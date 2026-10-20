@@ -157,10 +157,19 @@ pub enum Request {
         person: String,
         #[serde(default)]
         relay: Option<String>,
+        /// A Reason sign-in proof for this machine: then the name is the proof's.
+        #[serde(default)]
+        proof: Option<String>,
     },
     Join {
         ticket: String,
         person: String,
+        #[serde(default)]
+        proof: Option<String>,
+    },
+    /// Attach or refresh this machine's Reason sign-in proof.
+    Proof {
+        jws: String,
     },
     Invite {
         #[serde(default)]
@@ -298,6 +307,9 @@ pub struct Directory {
     pub machine: String,
     pub machines: Vec<MachineInfo>,
     pub sessions: Vec<SessionInfo>,
+    /// `Join the Reason Network: <team link>`, for agents to pass on.
+    #[serde(default)]
+    pub invite_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,10 +323,15 @@ pub struct MachineInfo {
     pub link: Option<String>,
     pub rtt_ms: Option<u64>,
     pub last_seen: Option<i64>,
+    /// The person's name is verified: a machine of theirs carries a Reason sign-in proof for it.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamInfo {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub relay: Option<String>,
     /// Whether this machine is on its relay right now (`None` while the network isn't up).
@@ -338,7 +355,7 @@ pub struct InviteInfo {
     /// Four words, like `plum-tiger-lake-orbit`. For a team with its own relay, the long form (a code would need n0's
     /// address lookup to find this machine).
     pub code: String,
-    /// The same invite as a long `tincan1…` string, for when the inviting machine will be offline.
+    /// The same invite as a long `rn1-…` string, for when the inviting machine will be offline.
     pub ticket: String,
     pub hours: u64,
 }

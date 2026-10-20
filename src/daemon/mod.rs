@@ -153,7 +153,7 @@ struct Live {
     stop_gen: u64,
 }
 
-fn load_key() -> Result<SecretKey> {
+pub fn load_key() -> Result<SecretKey> {
     let path = paths::home().join("machine.key");
     if let Ok(bytes) = std::fs::read(&path) {
         let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| anyhow!("{} is corrupt", path.display()))?;
@@ -295,8 +295,11 @@ impl Daemon {
             }
             Request::Hook(h) => json!(self.hook(h).await?),
             Request::Attach { agent, cwd } => json!(self.attach(&agent, &cwd)),
-            Request::CreateTeam { name, person, relay } => json!(self.create_team(&name, &person, relay).await?),
-            Request::Join { ticket, person } => json!(self.join_team(&ticket, &person).await?),
+            Request::CreateTeam { name, person, relay, proof } => {
+                json!(self.create_team(&name, &person, relay, proof).await?)
+            }
+            Request::Join { ticket, person, proof } => json!(self.join_team(&ticket, &person, proof).await?),
+            Request::Proof { jws } => json!(self.attach_proof(&jws)?),
             Request::Invite { me, hours } => json!(self.invite(me, hours).await?),
             Request::Team => json!(self.team_info()?),
             Request::Link { new } => json!(self.link(new).await?),

@@ -54,7 +54,7 @@ reason-network send alice/api-claude "did the token format change?"   # message 
 reason-network send alice/api-claude --notify "approve the deploy?"   # and pop it up on alice's screen
 reason-network send '*' "deploying api at 5"   # everyone (or alice/*, repo:api): from you, never an agent
 reason-network listen --as terminal                            # replies to what you sent from this terminal
-reason-network link                                            # the team link again
+reason-network link                                            # the invite line again: Join the Reason Network: <link>
 reason-network setup                                           # which agents are on it, and how messages are handled
 ```
 
@@ -70,13 +70,14 @@ computers never contact n0 at all. Only team members can connect, and a computer
 Messages to someone offline wait and go out when they're back.
 
 Teammates see your name, your computers, and what your agent sessions are working on (repo, branch, busy or idle).
-State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
+Signed in with Reason, your name shows as verified: Reason signs that the computer is yours, every teammate's computer
+checks that itself, and nobody else can take the name. State lives in `~/.reason/network`. Details: [DESIGN.md](DESIGN.md).
 
 ## For AI agents
 
-If your user gave you a Reason Network team link (`https://…/network/join/#tincan1…`) and wants to join: ask them
-what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#tincan1`
-followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
+If your user gave you a Reason Network team link (`https://…/network/join/#rn1-…`) and wants to join: ask them
+what name teammates should see, then run this with the whole link, exactly as given (first check it ends in `#rn1-`,
+or `#tincan1` in older links, followed only by letters, digits, `-` and `_`). It asks no questions and needs no account:
 
 ```sh
 curl -fsSL https://github.com/reason-machines/reason-network/releases/latest/download/install.sh | sh -s -- '<the whole link>' --as <name>

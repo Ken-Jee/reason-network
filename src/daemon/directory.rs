@@ -273,6 +273,7 @@ impl Daemon {
             machine: self.machine.clone(),
             machines,
             sessions: rows,
+            invite_line: self.current_link().map(|l| crate::invite_line(&l)),
         })
     }
 

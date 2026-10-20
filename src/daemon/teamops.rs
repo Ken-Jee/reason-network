@@ -6,8 +6,9 @@ use crate::{
     config::Config,
     invite,
     net::{self, JoinRequest, Net, Remote, Wire},
+    proof,
     proto::*,
-    team::{TeamState, Ticket},
+    team::{self, TeamState, Ticket},
     util,
 };
 use anyhow::{Result, anyhow, bail};
@@ -144,7 +145,9 @@ impl Daemon {
 
     /// Someone presented an invite (on the join protocol).
     pub fn redeem(self: &Arc<Self>, joiner: EndpointId, req: &JoinRequest) -> Result<TeamState> {
-        let person = util::slug(&req.person);
+        // Signed in to Reason: the name is the one Reason gave.
+        let proof = req.proof.as_deref().map(|p| proof::verify(p, &joiner)).transpose()?;
+        let person = proof.as_ref().map_or_else(|| util::slug(&req.person), |p| p.name.clone());
         let machine = util::slug(&req.machine);
         if person.is_empty() || machine.is_empty() {
             bail!("a name needs letters or digits");
@@ -155,7 +158,10 @@ impl Daemon {
             if !req.team.is_empty() && req.team != team.id {
                 bail!("this invite is for a different team");
             }
-            team.redeem(&self.key, &req.secret, &person, joiner)?;
+            team.redeem(&self.key, &req.secret, &person, joiner, proof.as_ref())?;
+            if let Some(p) = &req.proof {
+                team.attest(&joiner, p);
+            }
             team.put_member(&self.key, joiner, &person, &machine, true);
             let state = team.clone();
             self.save_team(&g)?;
@@ -174,15 +180,21 @@ impl Daemon {
         name: &str,
         person: &str,
         relay: Option<String>,
+        proof: Option<String>,
     ) -> Result<TeamInfo> {
         if let Some(t) = self.team_state() {
             bail!("already in team '{}'; run `{CLI} leave` first", t.name());
         }
-        let (name, person) = (name.trim(), util::slug(person));
+        let checked = proof.as_deref().map(|p| proof::verify(p, &self.key.public())).transpose()?;
+        let name = name.trim();
+        let person = checked.map_or_else(|| util::slug(person), |p| p.name);
         if name.is_empty() || person.is_empty() {
             bail!("the team and your name need letters or digits");
         }
         let mut state = TeamState::found(name, &person, &self.machine, &self.key);
+        if let Some(p) = &proof {
+            state.attest(&self.key.public(), p);
+        }
         if let Some(u) = &relay {
             net::check_relay(self.key.clone(), u).await?;
             state.set_relay(&self.key, relay.clone());
@@ -195,6 +207,7 @@ impl Daemon {
         self.become_person(&person)?;
         self.restart_soon();
         Ok(TeamInfo {
+            id: self.team_id().unwrap_or_default(),
             name: name.into(),
             relay,
             relay_connected: None,
@@ -204,8 +217,16 @@ impl Daemon {
         })
     }
 
-    /// Joins with an invite code (`plum-tiger-lake-orbit`) or a long `tincan1…` ticket.
-    pub(super) async fn join_team(self: &Arc<Self>, invite_text: &str, person: &str) -> Result<TeamInfo> {
+    /// Joins with an invite code (`plum-tiger-lake-orbit`) or a team link (`rn1-…`, or an older `tincan1…`).
+    pub(super) async fn join_team(
+        self: &Arc<Self>,
+        invite_text: &str,
+        person: &str,
+        proof: Option<String>,
+    ) -> Result<TeamInfo> {
+        // A proof that doesn't verify here won't anywhere: say so before leaving anything.
+        let checked = proof.as_deref().map(|p| proof::verify(p, &self.key.public())).transpose()?;
+        let person = checked.map_or_else(|| person.to_string(), |p| p.name);
         let mut solo = false;
         if let Some(t) = self.team_state() {
             let me = self.key.public();
@@ -225,14 +246,14 @@ impl Daemon {
                 net.shutdown().await;
             }
         }
-        let res = self.join_with(invite_text, person).await;
+        let res = self.join_with(invite_text, &person, proof).await;
         if res.is_err() && solo {
             let _ = self.start_net().await;
         }
         res
     }
 
-    async fn join_with(self: &Arc<Self>, invite_text: &str, person: &str) -> Result<TeamInfo> {
+    async fn join_with(self: &Arc<Self>, invite_text: &str, person: &str, proof: Option<String>) -> Result<TeamInfo> {
         let person = util::slug(person);
         if person.is_empty() {
             bail!("your name needs letters or digits");
@@ -242,7 +263,7 @@ impl Daemon {
             Some(code) => {
                 (String::new(), invite::secret(&code), None, vec![EndpointAddr::new(invite::key(&code).public())])
             }
-            None if invite_text.contains("tincan1") => {
+            None if Ticket::is_ticket(invite_text) => {
                 let t = Ticket::decode(invite_text)?;
                 let addrs = t.addrs();
                 (t.team, t.secret, t.relay, addrs)
@@ -250,14 +271,26 @@ impl Daemon {
             None => bail!("that's not an invite code (four words, like plum-tiger-lake-orbit)"),
         };
         let endpoint = net::bind(self.key.clone(), relay.as_deref(), self.cfg.lan()).await?;
-        let req = JoinRequest { team: team.clone(), secret, person: person.clone(), machine: self.machine.clone() };
+        let req = JoinRequest {
+            team: team.clone(),
+            secret: secret.clone(),
+            person: person.clone(),
+            machine: self.machine.clone(),
+            proof: proof.clone(),
+        };
         let res = net::join(&endpoint, &peers, &req).await;
         endpoint.close().await;
-        let state = TeamState::verified(&res?)?;
-        if (!team.is_empty() && state.id != team) || !state.is_active(&self.key.public()) {
+        let mut state = TeamState::verified(&res?)?;
+        let me = self.key.public();
+        if !handed_the_invited_team(&state, &team, &secret, &me) {
             bail!("the team did not add this machine");
         }
+        // An inviting machine from before sign-in proofs passes ours over: it goes out with this machine's state.
+        if let Some(p) = &proof {
+            state.attest(&me, p);
+        }
         let info = TeamInfo {
+            id: state.id.clone(),
             name: state.name().into(),
             relay: state.meta.body.relay.clone(),
             relay_connected: None,
@@ -273,6 +306,29 @@ impl Daemon {
         self.become_person(&person)?;
         self.restart_soon();
         Ok(info)
+    }
+
+    /// Attaches (or refreshes) this machine's Reason sign-in proof, for its teammates to check.
+    pub(super) fn attach_proof(self: &Arc<Self>, jws: &str) -> Result<String> {
+        let me = self.key.public();
+        let p = proof::verify(jws, &me)?;
+        let state = {
+            let mut g = self.inner.lock().unwrap();
+            let team = g.team.as_mut().ok_or_else(|| anyhow!("not in a team yet: run `{CLI}`"))?;
+            let person = team.member(&me).map(|m| m.person.clone()).unwrap_or_default();
+            if p.name != person {
+                bail!("this proof is for {}, but this machine is {person} in the team", p.name);
+            }
+            team.attest(&me, jws);
+            let state = team.clone();
+            self.save_team(&g)?;
+            state
+        };
+        if let Some(net) = self.net() {
+            net.broadcast(&Wire::State { state: Box::new(state) });
+        }
+        let days = (p.exp - util::now_ms() / 1000) / 86_400;
+        Ok(format!("{} on {} is verified, for {days} more days.", p.name, self.machine))
     }
 
     fn become_person(&self, person: &str) -> Result<()> {
@@ -359,11 +415,19 @@ impl Daemon {
         Ok(LinkInfo { team: state.name().into(), url: crate::join_url(&ticket), ticket })
     }
 
+    /// The team link as it is now, without making one (for `list_team`).
+    pub(super) fn current_link(&self) -> Option<String> {
+        let state = self.team_state()?;
+        let secret = state.link_secret()?.to_string();
+        Some(crate::join_url(&self.ticket(&state, secret).encode()))
+    }
+
     pub(super) fn team_info(&self) -> Result<TeamInfo> {
         let team = self
             .team_state()
             .ok_or_else(|| anyhow!("not in a team yet: `{CLI} init <team>` or `{CLI} join <invite>`"))?;
         Ok(TeamInfo {
+            id: team.id.clone(),
             name: team.name().into(),
             relay: team.meta.body.relay.clone(),
             relay_connected: self.net().map(|n| n.relay_connected()),
@@ -385,10 +449,12 @@ impl Daemon {
             link: None,
             rtt_ms: None,
             last_seen: None,
+            verified: false,
         };
         let (Some(team), net) = (self.team_state(), self.net()) else { return vec![here] };
+        let verified = team.verified_people();
         let remotes = net.as_ref().map(|n| n.remotes()).unwrap_or_default();
-        let mut out = vec![here];
+        let mut out = vec![MachineInfo { verified: verified.contains_key(&here.person), ..here }];
         for m in team.active().filter(|m| m.endpoint != me) {
             let link = net.as_ref().and_then(|n| n.link_info(&m.endpoint));
             out.push(MachineInfo {
@@ -400,6 +466,7 @@ impl Daemon {
                 link: link.as_ref().map(|l| if l.relay { "relay" } else { "direct" }.to_string()),
                 rtt_ms: link.map(|l| l.rtt_ms),
                 last_seen: remotes.get(&m.endpoint).map(|r| r.last_seen).filter(|t| *t > 0),
+                verified: verified.contains_key(&m.person),
             });
         }
         out[1..].sort_by(|a, b| (&a.person, &a.machine).cmp(&(&b.person, &b.machine)));
@@ -521,5 +588,49 @@ impl Daemon {
             );
         }
         Ok(out)
+    }
+}
+
+/// Whether the team a joiner was handed is the one it was invited to: the one a team link names, holding the invite it
+/// presented (for a code, the only thing that names the team), signed by a member, and letting this machine in.
+fn handed_the_invited_team(state: &TeamState, team: &str, secret: &str, me: &EndpointId) -> bool {
+    let invited =
+        state.invites.get(&team::hash(secret)).is_some_and(|i| i.body.reusable || i.body.used_by == Some(*me));
+    (team.is_empty() || state.id == team) && invited && state.is_active(me)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+
+    #[test]
+    fn a_code_joiner_checks_the_team_it_is_handed() {
+        let (a, me) = (SecretKey::generate(), SecretKey::generate());
+        let code = invite::generate();
+        let secret = invite::secret(&code);
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        s.invite(&a, &secret, 24, None);
+        s.redeem(&a, &secret, "sam", me.public(), None).unwrap();
+        s.put_member(&a, me.public(), "sam", "nuc", true);
+        let handed = TeamState::verified(&s).unwrap();
+        assert!(handed_the_invited_team(&handed, "", &secret, &me.public()));
+        assert!(handed_the_invited_team(&handed, &s.id, &secret, &me.public()));
+        assert!(!handed_the_invited_team(&handed, "00112233445566778899aabbccddeeff", &secret, &me.public()));
+        // Some other team, with this machine in it but not the invite (whoever answered on the code's key made it up).
+        let mut other = TeamState::found("not yours", "mallory", "evil", &a);
+        other.put_member(&a, me.public(), "sam", "nuc", true);
+        let other = TeamState::verified(&other).unwrap();
+        assert!(other.is_active(&me.public()));
+        assert!(!handed_the_invited_team(&other, "", &secret, &me.public()), "the code's invite isn't in it");
+        // The invite, but used by another machine.
+        let mut used = TeamState::found("vibes", "alex", "mbp", &a);
+        used.invite(&a, &secret, 24, None);
+        used.redeem(&a, &secret, "eve", SecretKey::generate().public(), None).unwrap();
+        used.put_member(&a, me.public(), "sam", "nuc", true);
+        assert!(!handed_the_invited_team(&TeamState::verified(&used).unwrap(), "", &secret, &me.public()));
+        // A team link's invite is reusable.
+        let link = s.link_secret().unwrap().to_string();
+        assert!(handed_the_invited_team(&handed, &s.id, &link, &me.public()));
     }
 }

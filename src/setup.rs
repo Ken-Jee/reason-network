@@ -1422,6 +1422,13 @@ pub async fn run(dry: bool, remove: bool, no_service: bool) -> Result<()> {
     Ok(())
 }
 
+/// Setup without the report, for `--json`: the agents it set up.
+pub async fn quietly() -> Result<Vec<&'static str>> {
+    let exe = exe()?;
+    let ids: Vec<&str> = detect(&exe).iter().map(|f| f.id).collect();
+    Ok(apply(&exe, &ids, &[], Some(true), false).await.agents)
+}
+
 /// Read-only checks, one line each.
 pub async fn doctor() -> Result<()> {
     let exe = exe()?;
