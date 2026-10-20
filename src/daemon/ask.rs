@@ -129,12 +129,9 @@ impl Daemon {
     /// Shows the question until it is answered or closes, then hands the answer to the calls waiting for it (and, for
     /// a teammate's request, to its sender).
     async fn pop_up(self: Arc<Self>, key: String, question: String, request: Option<(Message, String)>, cmd: Command) {
-        let mut cmd = tokio::process::Command::from(cmd);
-        let out = tokio::time::timeout(Duration::from_secs(OPEN_SECS + 60), cmd.kill_on_drop(true).output()).await;
-        let (answer, shown) = match out {
-            Ok(Ok(o)) if o.status.success() => parse(&String::from_utf8_lossy(&o.stdout)),
-            Ok(Ok(o)) => (Answer::Failed(String::from_utf8_lossy(&o.stderr).trim().to_string()), None),
-            Ok(Err(e)) => (Answer::Failed(e.to_string()), None),
+        let (answer, shown) = match tokio::time::timeout(Duration::from_secs(OPEN_SECS + 60), show(cmd)).await {
+            Ok(Ok(out)) => parse(&out),
+            Ok(Err(e)) => (Answer::Failed(e), None),
             Err(_) => (Answer::Unanswered, None),
         };
         if let Answer::Failed(e) = &answer {
@@ -298,6 +295,48 @@ impl Drop for Waiting<'_> {
             self.daemon.answer_later(self.key, &up.question, &answer);
         }
     }
+}
+
+/// What notify-send says when it couldn't show the question, in libnotify 0.7.10 to 0.8.9; it exits 1 then, but only
+/// once its expiry (an hour) is out. With no notification server it says both, the first in every version.
+const NOT_SHOWN: [&str; 2] = ["Actions are not supported", "Failed to show notification"];
+
+/// Runs the pop-up and returns what it printed, or why it couldn't be shown: at once when notify-send says so.
+async fn show(cmd: Command) -> Result<String, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let mut child = tokio::process::Command::from(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr = BufReader::new(child.stderr.take().expect("piped")).split(b'\n');
+    let out = async {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).await.map_err(|e| e.to_string())?;
+        Ok(out)
+    };
+    let said = async {
+        let mut said = String::new();
+        // Read on whatever it is: a line that isn't UTF-8 (PowerShell's errors on Windows needn't be) mustn't stop it.
+        while let Ok(Some(line)) = stderr.next_segment().await {
+            let line = String::from_utf8_lossy(&line);
+            if NOT_SHOWN.iter().any(|s| line.starts_with(s)) {
+                return Err(format!("{said}{line}").trim().to_string());
+            }
+            said += line.trim_end_matches('\r');
+            said.push('\n');
+        }
+        Ok(said)
+    };
+    let (out, said) = tokio::try_join!(out, said)?;
+    if !child.wait().await.map_err(|e| e.to_string())?.success() {
+        return Err(said.trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The button on the first line (`approve` or `deny`); from a panel, how much of the request and of the question it
@@ -491,6 +530,23 @@ mod tests {
         );
         assert_eq!(clip("abcdef", 3), "abc…");
         assert_eq!(clip("abc", 3), "abc");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pop_up_that_cant_show_fails_at_once() {
+        let sh = |script: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", script]);
+            cmd
+        };
+        // notify-send with no notification server: it says so, then waits out its expiry.
+        let started = std::time::Instant::now();
+        let failed = show(sh("echo 'Failed to show notification: ServiceUnknown' >&2; sleep 30")).await;
+        assert_eq!(failed, Err("Failed to show notification: ServiceUnknown".into()));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(show(sh("echo 'Wait timeout expired' >&2; echo approve")).await, Ok("approve\n".into()));
+        assert_eq!(show(sh("echo 'no bus' >&2; exit 1")).await, Err("no bus".into()));
     }
 
     #[test]
