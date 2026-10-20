@@ -126,6 +126,14 @@ def link_relays(link):
         fields.append(("n0 " if short else "") + raw[at + 1:at + 1 + raw[at]].decode())
         at += 1 + raw[at]
     return fields[1:]
+
+
+def link_secret(link):
+    """The team link's secret (the 16 bytes after the team id), as hex."""
+    t = re.split(r"#rn1-|#tincan1", link)[1]
+    return base64.urlsafe_b64decode(t + "=" * (-len(t) % 4))[16:32].hex()
+
+
 os.makedirs(os.path.join(D, "work"), exist_ok=True)
 
 # --- team formation, signed in with Reason ---
@@ -242,6 +250,41 @@ subprocess.run([BIN, "stop"], env=dict(bob, REASON_NETWORK_HOME=os.path.join(D, 
 out = subprocess.run([BIN, "link"], env=bob, capture_output=True, text=True, timeout=30).stdout
 check("any member can show the same team link", link.group(1).split("#")[1][:40] in out.replace("\n", ""), out)
 subprocess.run([BIN, "stop"], env=bob, capture_output=True)
+
+# --- removal while online: the removed machine never gets the link that replaces the one it knew ---
+eve = dict(env("alice"), REASON_NETWORK_HOME=os.path.join(D, "eve"), REASON_NETWORK_MACHINE="tab")
+eve_link = re.search(r"(https://\S+#rn1-\S+)", cli("alex", "link")).group(1)
+_, out = run(eve, "join", eve_link, "--as", "eve", "--no-setup")
+check("eve joins", "Joined team vibes as eve on tab." in out, out)
+for _ in range(30):
+    if re.search(r"eve\s+tab\s+(direct|relay)", cli("alex", "team")):
+        break
+    time.sleep(1)
+out = cli("alex", "remove", "eve")
+check("remove eve while her machine is online", "Removed eve on tab" in out, out)
+for _ in range(30):
+    if "not in a team" in run(eve, "team")[1]:
+        break
+    time.sleep(1)
+check("eve's machine hears it was removed", "not in a team" in run(eve, "team")[1])
+new_link = re.search(r"(https://\S+#rn1-\S+)", cli("alex", "link")).group(1)
+new_secret = link_secret(new_link)
+check("the link changed", new_secret != link_secret(eve_link))
+held = b"".join(open(os.path.join(D, "eve", f), "rb").read() for f in ("network.db", "network.db-wal", "network.db-shm")
+                if os.path.exists(os.path.join(D, "eve", f)))
+check("the removed machine's database and its log hold no current link secret", held and new_secret.encode() not in held,
+      f"{len(held)} bytes")
+seen = set(re.findall(rb'"secret":"([0-9a-f]{32})"', held))
+check("…nor any link secret it could rebuild a link from", all(sec.decode() != new_secret for sec in seen), seen)
+_, out = run(eve, "join", eve_link, "--as", "eve2", "--no-setup")
+check("…so it can't rejoin with the old link", "Joined" not in out and "replaced" in out, out)
+if os.name != "nt":
+    modes = {f: oct(os.stat(os.path.join(D, "eve", f)).st_mode & 0o777) for f in ("network.db", "network.db-wal", "network.db-shm")
+             if os.path.exists(os.path.join(D, "eve", f))}
+    check("the database files are the user's alone", modes and all(m == "0o600" for m in modes.values()), modes)
+run(eve, "stop")
+out = cli("alice", "team")
+check("the others are still connected", re.search(r"alex \(verified\)\s+laptop\s+(direct|relay)", out) is not None, out)
 
 # --- sessions on both machines ---
 claude = Mcp("alex", "claude-code", strip_claude=False, cwd=ROOT)

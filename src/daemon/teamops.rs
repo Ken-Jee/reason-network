@@ -119,8 +119,13 @@ impl Daemon {
             let after: HashSet<EndpointId> = team.active().map(|m| m.endpoint).collect();
             let state = team.clone();
             let relay_changed = state.meta.body.relay != relay;
-            let _ = self.save_team(&g);
-            (state, before.difference(&after).copied().collect::<Vec<_>>(), !after.contains(&me), relay_changed)
+            let gone = !after.contains(&me);
+            // Removed: what came with the news (a team link that replaced the one this machine knew, from a teammate
+            // on an older build) is never written here, not even to the database's log.
+            if !gone {
+                let _ = self.save_team(&g);
+            }
+            (state, before.difference(&after).copied().collect::<Vec<_>>(), gone, relay_changed)
         };
         if let Some(net) = self.net() {
             net.broadcast(&Wire::State { state: Box::new(state) });
@@ -135,6 +140,7 @@ impl Daemon {
             g.team = None;
             let _ = self.save_team(&g);
             let _ = g.store.delete_prefix("presence:");
+            let _ = g.store.scrub();
             drop(g);
             self.restart_soon();
         } else if relay_changed {

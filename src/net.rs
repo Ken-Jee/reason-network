@@ -285,6 +285,16 @@ impl Refusals {
     }
 }
 
+/// What `w` is for `peer`: team state with the team link and invites only for a machine that is an active member in that
+/// state. A machine it says was removed (still connected for a moment, so it hears so) learns who's in the team, not
+/// the link that replaced the one it knew.
+fn for_peer(w: &Wire, peer: &EndpointId) -> Wire {
+    match w {
+        Wire::State { state } if !state.is_active(peer) => Wire::State { state: Box::new(state.without_secrets()) },
+        w => w.clone(),
+    }
+}
+
 /// Nothing is known yet about where that machine is.
 fn unpublished(e: &anyhow::Error) -> bool {
     matches!(
@@ -462,8 +472,8 @@ impl Net {
     }
 
     pub fn broadcast(&self, w: &Wire) {
-        for l in self.links.lock().unwrap().values() {
-            let _ = l.tx.send(w.clone());
+        for (peer, l) in self.links.lock().unwrap().iter() {
+            let _ = l.tx.send(for_peer(w, peer));
         }
     }
 
@@ -653,7 +663,7 @@ impl Net {
         });
         let _ = tx.send(Wire::Hello { team, proto: PROTO });
         if let Some(state) = daemon.team_state() {
-            let _ = tx.send(Wire::State { state: Box::new(state) });
+            let _ = tx.send(for_peer(&Wire::State { state: Box::new(state) }, &peer));
         }
         let _ = tx.send(Wire::Presence { presence: daemon.presence().await });
         for msg in daemon.outbox_for(&peer) {
@@ -768,6 +778,30 @@ fn tidy_presence(mut p: Presence) -> Presence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_removed_machine_is_sent_no_link_or_invite() {
+        let (a, b, c) = (SecretKey::generate(), SecretKey::generate(), SecretKey::generate());
+        let mut s = TeamState::found("vibes", "alex", "mbp", &a);
+        s.put_member(&a, b.public(), "alice", "xps", true);
+        s.invite(&a, &"00".repeat(16), 24, None);
+        // Removing alice replaces the link; the state saying so goes out while her machine is still connected.
+        s.put_member(&a, b.public(), "alice", "xps", false);
+        s.new_link(&a);
+        let w = Wire::State { state: Box::new(s.clone()) };
+        let Wire::State { state: to_b } = for_peer(&w, &b.public()) else { panic!() };
+        assert!(to_b.link.is_none() && to_b.invites.is_empty());
+        assert!(!to_b.is_active(&b.public()), "but it does say she was removed");
+        let text = serde_json::to_string(&for_peer(&w, &b.public())).unwrap();
+        assert!(!text.contains(s.link_secret().unwrap()));
+        // Nor a stranger; a member gets it all, and anything else goes as it is.
+        let Wire::State { state: to_c } = for_peer(&w, &c.public()) else { panic!() };
+        assert!(to_c.link.is_none());
+        let Wire::State { state: to_a } = for_peer(&w, &a.public()) else { panic!() };
+        assert_eq!(*to_a, s);
+        let ack = Wire::Ack { id: "x".into(), state: "stored".into(), note: String::new() };
+        assert!(matches!(for_peer(&ack, &b.public()), Wire::Ack { .. }));
+    }
 
     #[test]
     fn a_joiner_with_a_proof_asks_on_past_a_refusal() {
