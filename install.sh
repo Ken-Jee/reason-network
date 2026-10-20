@@ -74,6 +74,18 @@ fi
 [ -n "$want" ] && [ "$want" = "$got" ] || die "checksum mismatch; not installing"
 tar -xzf "$tmp/reason-network.tar.gz" -C "$tmp"
 "$tmp/reason-network" --version >/dev/null 2>&1 || die "the downloaded binary doesn't run here; not installing"
+# macOS knows a program by its code signature when it asks whether it may reach the local network. A build signed by
+# a developer team keeps that answer across updates; an unsigned one is a new program every time. So a signed
+# reason-network is only ever replaced by one its team signed.
+team() { codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p'; }
+if [ "$os" = apple-darwin ] && [ -e "$bin_dir/reason-network" ] && command -v codesign >/dev/null 2>&1; then
+  have="$(team "$bin_dir/reason-network")"
+  case "$have" in
+    "" | "not set") ;;
+    *) [ "$(team "$tmp/reason-network")" = "$have" ] ||
+         die "this build isn't signed by $have, as the installed one is; keeping that one (try again later)" ;;
+  esac
+fi
 mkdir -p "$bin_dir"
 # A new file moved into place: whatever runs the old one (a hook, an agent's tools) never sees a half-written binary.
 install -m 755 "$tmp/reason-network" "$bin_dir/.reason-network.new"
