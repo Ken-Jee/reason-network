@@ -1189,7 +1189,7 @@ fn contains(text: &str, needle: &str) -> bool {
 
 fn same_path(text: &str, path: &Path) -> bool {
     let path = path.display().to_string();
-    if cfg!(windows) { text.eq_ignore_ascii_case(&path) } else { text == path }
+    if cfg!(windows) { text.to_lowercase() == path.to_lowercase() } else { text == path }
 }
 
 fn has(path: PathBuf, needle: &str) -> bool {
@@ -1623,5 +1623,9 @@ mod tests {
         assert!(ours(r#""command": "d:\\PROGRAM FILES\\reason-network\\reason-network.exe""#, exe));
         assert!(same_path(r"D:\program files\reason-network\reason-network.exe", exe));
         assert!(!same_path(r"D:\program files\reason-network\other.exe", exe));
+        // Both fold case beyond ASCII, as Windows does: one spelling can't match in one and not the other.
+        let exe = Path::new(r"C:\Users\Jörg\reason-network.exe");
+        assert!(ours(r"command = 'C:\USERS\JÖRG\reason-network.exe'", exe));
+        assert!(same_path(r"C:\USERS\JÖRG\reason-network.exe", exe));
     }
 }
