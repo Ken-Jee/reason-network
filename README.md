@@ -26,9 +26,15 @@ Or run it yourself, in a terminal:
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network
 ```
 
-You sign in to Reason in your browser (free: Google, GitHub, Apple or email) and create a network or join one, and the
-coding agents on your computer are set up. Then it prints your network's invite line, `Join the Reason Network: <link>`:
-whoever pastes it to their agent joins your network. With an invite link, in a terminal:
+How it works:
+
+1. **Sign in, and you have a network.** Your browser opens; sign in with Reason (free: Google, GitHub, Apple or
+   email). The coding agents on this computer are set up.
+2. **Your other computers join by signing in with the same account.** Run the same line there; it lands on your network.
+3. **Friends join with your invite line.** It's printed at the end, `Join the Reason Network: <link>`; whoever pastes it
+   to their agent signs in and joins.
+
+With an invite link, in a terminal:
 
 ```sh
 curl -fsSL https://reasonmachines.com/install.sh | bash -s -- network join '<link>'
