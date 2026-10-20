@@ -501,6 +501,17 @@ impl Daemon {
             if g.store.has(&msg.id)? {
                 return Ok(("queued".into(), "already delivered".into()));
             }
+            // Files take room here: past the quota, the sender's machine keeps the message and tries again later.
+            let bytes = files::size(&msg.files);
+            if bytes > 0 {
+                let kept = g.store.files_kept()?;
+                if let Err(why) = g.quota.admit(&sender, bytes, kept, Instant::now()) {
+                    return Ok((
+                        "retry".into(),
+                        format!("queued: {} can't take these files now ({why}); retrying later", self.machine),
+                    ));
+                }
+            }
             if !g.loop_ok(&msg.from, &msg.to) {
                 return Ok(("refused".into(), LOOP_NOTE.into()));
             }
@@ -581,7 +592,10 @@ impl Daemon {
     /// Approves or drops held messages. Approved ones go to their session now.
     pub(super) fn settle(self: &Arc<Self>, ids: &[String], release: bool) -> Result<usize> {
         let mut g = self.inner.lock().unwrap();
-        let msgs = g.store.settle_held(ids, release)?;
+        let (msgs, unsaved) = g.store.settle_held(ids, release)?;
+        for (id, why) in &unsaved {
+            log(&format!("held message {id} stays held: its files couldn't be saved ({why})"));
+        }
         if release {
             for m in &msgs {
                 let name = m.to.split_once('/').map_or("", |(_, n)| n);
@@ -647,7 +661,9 @@ fn clean(m: Message) -> Result<Message> {
     let ok = |s: &str, extra: &str| {
         !s.is_empty() && s.len() <= 120 && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
     };
-    if !ok(&m.id, "") || !ok(&m.from, "-/") || !ok(&m.to, "-/") {
+    // Every engine names a message by a ULID, as written: one id, in one case.
+    let canonical = Ulid::from_string(&m.id).is_ok_and(|u| u.to_string() == m.id);
+    if !canonical || !ok(&m.from, "-/") || !ok(&m.to, "-/") {
         bail!("malformed message");
     }
     Ok(Message {
@@ -696,6 +712,30 @@ mod tests {
     use super::*;
     use iroh::SecretKey;
     use serde::Deserialize;
+
+    #[test]
+    fn a_peers_message_id_is_a_ulid_as_written() {
+        let msg = |id: &str| Message {
+            id: id.into(),
+            from: "bob/api".into(),
+            from_agent: None,
+            from_repo: None,
+            to: "alex/web".into(),
+            via: None,
+            reply_to: None,
+            body: "hi".into(),
+            wake: true,
+            notify: false,
+            sent_at: 0,
+            approval: None,
+            files: Vec::new(),
+        };
+        let id = Ulid::new().to_string();
+        assert!(clean(msg(&id)).is_ok());
+        for bad in [id.to_lowercase(), "CON".into(), "01ALICEMSG".into(), format!("{id}0"), String::new()] {
+            assert!(clean(msg(&bad)).is_err(), "{bad}");
+        }
+    }
 
     fn approval(asker: &str, approver: &str) -> Approval {
         Approval {

@@ -288,7 +288,9 @@ impl Daemon {
         // Files of messages that are gone, or were read a day ago.
         if now - g.swept > 10 * 60_000 {
             g.swept = now;
-            g.store.sweep_files(now);
+            if let Err(e) = g.store.sweep_files(now) {
+                log(&format!("sweeping the inbox folder: {e:#}"));
+            }
         }
     }
 }

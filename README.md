@@ -41,8 +41,8 @@ trust the new hooks.
   up; Cursor, Gemini, Copilot and Grok at their next step; DeepSeek Harness when it checks its inbox (every tool
   result says if mail is waiting). Claude sessions you already had open join without a restart.
 - **Small text files go along.** A message can carry up to 10 text files (markdown, code, JSON, logs, config; 256 KB
-  each, 512 KB in all). The recipient's engine saves copies under `~/.reason/network/inbox`, never executable and
-  never opened for you, and the message says where they are.
+  each, 512 KB in all); agents send them from their own folder, never hidden files. The recipient's engine saves copies
+  under `~/.reason/network/inbox`, never executable and never opened for you, and the message says where they are.
 - **Your sign-off, even when you're away from your agent.** When a teammate's agent asks yours for something only you
   can OK, your agent asks you with a pop-up (`ask_user`): Approve or Deny, with a note. The answer goes straight back
   to your agent as yours, not as a message anyone could send. With `notify`, a message also pops up on the person's
