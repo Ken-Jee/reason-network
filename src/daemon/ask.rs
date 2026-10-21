@@ -297,8 +297,8 @@ impl Drop for Waiting<'_> {
     }
 }
 
-/// What notify-send says when it couldn't show the question, in libnotify 0.7.10 to 0.8.9; it exits 1 then, but only
-/// once its expiry (an hour) is out. With no notification server it says both, the first in every version.
+/// What notify-send says when it couldn't show the question: the first since libnotify 0.7.10, the second since
+/// 0.8.8. It exits 1 then, but only once its expiry (an hour) is out. With no notification server, all say the first.
 const NOT_SHOWN: [&str; 2] = ["Actions are not supported", "Failed to show notification"];
 
 /// Runs the pop-up and returns what it printed, or why it couldn't be shown: at once when notify-send says so.
